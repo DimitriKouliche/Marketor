@@ -1,0 +1,28 @@
+# API Credentials
+credentials.json
+token.json
+
+# Sensitive Data
+steam_keys.txt
+key_assignments.json
+email_tracking.json
+
+# Generated Files
+*.csv
+email_drafts.txt
+
+# Backups
+backups/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+
+# OS Files
+.DS_Store
+Thumbs.db
