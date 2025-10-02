@@ -36,7 +36,7 @@ help:
 # Installation
 install:
 	@echo "📦 Installing Python dependencies..."
-	poetry install
+	poetry install --no-root
 	@echo "✓ Dependencies installed successfully!"
 
 # First-time setup
