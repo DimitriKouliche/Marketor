@@ -18,8 +18,9 @@ TWITCH_CLIENT_SECRET = "YOUR_TWITCH_CLIENT_SECRET"
 
 MIN_FOLLOWERS = 500
 MAX_FOLLOWERS = 100000
-DAYS_SINCE_LAST_VIDEO = 10
+DAYS_SINCE_LAST_VIDEO = 60
 
+CHANNEL_CACHE = {}
 
 # ============= EMAIL EXTRACTION =============
 
@@ -128,25 +129,24 @@ def is_gaming_channel(description: str, video_titles: List[str]) -> bool:
 # ============= YOUTUBE FUNCTIONS =============
 
 def search_youtube_platformer_videos(api_key: str, days: int = 30) -> List[Dict]:
-    """Search YouTube for recent platformer gaming videos"""
+    """Search YouTube for recent platformer gaming videos (optimized)"""
     base_url = "https://www.googleapis.com/youtube/v3/search"
     published_after = (datetime.now() - timedelta(days=days)).isoformat() + "Z"
 
+    # Reduced to 8 high-quality keywords
     keywords = [
-        "celeste speedrun", "celeste gameplay",
-        "hollow knight playthrough", "hollow knight gameplay",
-        "dead cells gameplay", "dead cells run",
-        "super meat boy", "meat boy speedrun",
-        "shovel knight gameplay",
-        "ori gameplay", "ori blind forest",
-        "the messenger gameplay",
-        "indie platformer 2024", "indie platformer 2025",
-        "2d platformer indie game",
+        "celeste gameplay",
+        "hollow knight gameplay",
+        "indie platformer gameplay",
+        "metroidvania gameplay",
         "platformer speedrun",
-        "lets play platformer", "platformer playthrough"
+        "2d platformer let's play",
+        "cuphead gameplay",
+        "dead cells gameplay"
     ]
 
     all_channels = []
+    seen_video_ids = set()
 
     for keyword in keywords:
         params = {
@@ -155,7 +155,7 @@ def search_youtube_platformer_videos(api_key: str, days: int = 30) -> List[Dict]
             "type": "video",
             "videoCategoryId": "20",
             "publishedAfter": published_after,
-            "maxResults": 50,
+            "maxResults": 50,  # Keep at 50
             "key": api_key
         }
 
@@ -166,24 +166,32 @@ def search_youtube_platformer_videos(api_key: str, days: int = 30) -> List[Dict]
                 data = response.json()
 
                 for item in data.get("items", []):
-                    all_channels.append({
-                        "channel_id": item["snippet"]["channelId"],
-                        "channel_title": item["snippet"]["channelTitle"],
-                        "video_title": item["snippet"]["title"],
-                        "video_id": item["id"]["videoId"],
-                        "published_at": item["snippet"]["publishedAt"],
-                        "platform": "youtube"
-                    })
+                    video_id = item["id"]["videoId"]
+
+                    # Skip duplicate videos
+                    if video_id in seen_video_ids:
+                        continue
+
+                    seen_video_ids.add(video_id)
+
+                    all_channels.append(
+                        {
+                            "channel_id": item["snippet"]["channelId"],
+                            "channel_title": item["snippet"]["channelTitle"],
+                            "video_title": item["snippet"]["title"],
+                            "video_id": video_id,
+                            "published_at": item["snippet"]["publishedAt"],
+                            "platform": "youtube"
+                        }
+                    )
 
                 time.sleep(0.1)
             elif response.status_code == 403:
-                print(f"  ⚠️  YouTube API quota exceeded or invalid key")
+                print(f"  ⚠️ YouTube API quota exceeded")
                 break
-            else:
-                print(f"  ⚠️  Error searching '{keyword}': {response.status_code}")
 
         except Exception as e:
-            print(f"  ⚠️  Error searching '{keyword}': {e}")
+            print(f"  ⚠️ Error searching '{keyword}': {e}")
             continue
 
     print(f"  ➤ Found {len(all_channels)} total videos from searches")
@@ -191,11 +199,16 @@ def search_youtube_platformer_videos(api_key: str, days: int = 30) -> List[Dict]
 
 
 def get_youtube_channel_details(api_key: str, channel_id: str) -> Optional[Dict]:
-    """Get comprehensive channel information"""
+    """Get channel information (with caching)"""
+
+    # Check cache first
+    if channel_id in CHANNEL_CACHE:
+        return CHANNEL_CACHE[channel_id]
+
     base_url = "https://www.googleapis.com/youtube/v3/channels"
 
     params = {
-        "part": "statistics,snippet,brandingSettings",
+        "part": "statistics,snippet",  # Removed brandingSettings to save quota
         "id": channel_id,
         "key": api_key
     }
@@ -211,22 +224,22 @@ def get_youtube_channel_details(api_key: str, channel_id: str) -> Optional[Dict]
                 snippet = item["snippet"]
                 stats = item["statistics"]
 
-                description = snippet.get("description", "")
-                custom_url = snippet.get("customUrl", "")
-                published_at = snippet.get("publishedAt", "")
-
-                return {
+                result = {
                     "channel_id": channel_id,
                     "title": snippet["title"],
-                    "custom_url": custom_url,
-                    "description": description,
+                    "custom_url": snippet.get("customUrl", ""),
+                    "description": snippet.get("description", ""),
                     "subscriber_count": int(stats.get("subscriberCount", 0)),
                     "view_count": int(stats.get("viewCount", 0)),
                     "video_count": int(stats.get("videoCount", 0)),
                     "country": snippet.get("country", ""),
-                    "created_at": published_at,
+                    "created_at": snippet.get("publishedAt", ""),
                     "url": f"https://youtube.com/channel/{channel_id}"
                 }
+
+                # Cache the result
+                CHANNEL_CACHE[channel_id] = result
+                return result
     except Exception as e:
         return None
 
@@ -326,91 +339,99 @@ def calculate_youtube_metrics(videos: List[Dict], channel_created: str) -> Dict:
 
 
 def process_youtube_channels(api_key: str, channels: List[Dict], min_subs: int, max_subs: int) -> List[Dict]:
-    """Process YouTube channels with contact extraction"""
+    """Process YouTube channels (optimized with batch filtering)"""
     processed = []
     seen_channels = set()
 
+    # Group by channel to reduce API calls
+    channels_by_id = {}
     for channel_data in channels:
         channel_id = channel_data["channel_id"]
+        if channel_id not in channels_by_id:
+            channels_by_id[channel_id] = channel_data
 
-        if channel_id in seen_channels:
-            continue
+    print(f"  ➤ Processing {len(channels_by_id)} unique channels...")
 
-        seen_channels.add(channel_id)
-
+    for channel_id, channel_data in channels_by_id.items():
         details = get_youtube_channel_details(api_key, channel_id)
 
-        if details and min_subs <= details["subscriber_count"] <= max_subs:
-            description = details["description"]
+        if not details:
+            continue
 
-            recent_videos = get_youtube_recent_videos(api_key, channel_id, max_results=10)
-            video_titles = [v.get("title", "") for v in recent_videos]
+        # Quick filter by subscriber count first (before expensive API calls)
+        if not (min_subs <= details["subscriber_count"] <= max_subs):
+            continue
 
-            if not is_gaming_channel(description, video_titles):
-                print(f"  ⏭️  Skipping {details['title']} - not a gaming content creator")
-                continue
+        description = details["description"]
 
-            emails = extract_emails(description)
-            social_links = extract_social_links(description)
-            business_terms = extract_business_terms(description)
-            sentiment_analysis = analyze_sentiment(description)
-            metrics = calculate_youtube_metrics(recent_videos, details.get("created_at", ""))
+        # Only get recent videos if we passed initial filters
+        recent_videos = get_youtube_recent_videos(api_key, channel_id, max_results=5)  # Reduced from 10
+        video_titles = [v.get("title", "") for v in recent_videos]
 
-            engagement_rate_str = calculate_engagement_rate(details["view_count"], details["subscriber_count"],
-                                                            details["video_count"])
+        if not is_gaming_channel(description, video_titles):
+            continue
 
-            if metrics["avg_views_per_video"] > 0 and details["subscriber_count"] > 0:
-                engagement_numeric = (metrics["avg_views_per_video"] / details["subscriber_count"]) * 100
-            else:
-                engagement_numeric = 0
+        emails = extract_emails(description)
+        social_links = extract_social_links(description)
+        business_terms = extract_business_terms(description)
+        sentiment_analysis = analyze_sentiment(description)
+        metrics = calculate_youtube_metrics(recent_videos, details.get("created_at", ""))
 
-            influencer_data = {
-                "platform": "YouTube",
-                "username": details["title"],
-                "custom_url": details["custom_url"],
-                "url": details["url"],
-                "followers": details["subscriber_count"],
-                "total_views": details["view_count"],
-                "video_count": details["video_count"],
-                "country": details["country"],
-                "last_video_title": channel_data["video_title"],
-                "last_video_date": channel_data["published_at"],
-                "last_video_url": f"https://youtube.com/watch?v={channel_data['video_id']}",
-                "emails": ", ".join(emails) if emails else "Not found",
-                "email_count": len(emails),
-                "twitter": social_links.get("twitter", ""),
-                "instagram": social_links.get("instagram", ""),
-                "discord": social_links.get("discord", ""),
-                "tiktok": social_links.get("tiktok", ""),
-                "has_business_terms": "Yes" if business_terms else "No",
-                "business_terms": ", ".join(business_terms),
-                "bio_snippet": description[:200] + "..." if len(description) > 200 else description,
-                "engagement_rate": engagement_rate_str,
-                "engagement_rate_numeric": round(engagement_numeric, 2),
-                "avg_views_per_video": metrics["avg_views_per_video"],
-                "avg_likes_per_video": metrics["avg_likes_per_video"],
-                "upload_frequency_days": metrics["upload_frequency_days"],
-                "upload_consistency": metrics["upload_consistency"],
-                "indie_sentiment": sentiment_analysis["sentiment"],
-                "indie_sentiment_score": sentiment_analysis["score"],
-                "indie_sentiment_indicators": ", ".join(sentiment_analysis["indicators"])
-            }
+        engagement_rate_str = calculate_engagement_rate(
+            details["view_count"], details["subscriber_count"],
+            details["video_count"]
+        )
 
-            response_analysis = calculate_response_likelihood(influencer_data)
-            influencer_data["response_likelihood"] = response_analysis["likelihood"]
-            influencer_data["response_score"] = response_analysis["score"]
-            influencer_data["response_factors"] = " | ".join(response_analysis["factors"])
+        if metrics["avg_views_per_video"] > 0 and details["subscriber_count"] > 0:
+            engagement_numeric = (metrics["avg_views_per_video"] / details["subscriber_count"]) * 100
+        else:
+            engagement_numeric = 0
 
-            influencer_data["icebreaker"] = generate_icebreaker(
-                platform="YouTube",
-                name=details["title"],
-                recent_video=channel_data["video_title"],
-                subscriber_count=details["subscriber_count"]
-            )
+        influencer_data = {
+            "platform": "YouTube",
+            "username": details["title"],
+            "custom_url": details["custom_url"],
+            "url": details["url"],
+            "followers": details["subscriber_count"],
+            "total_views": details["view_count"],
+            "video_count": details["video_count"],
+            "country": details["country"],
+            "last_video_title": channel_data["video_title"],
+            "last_video_date": channel_data["published_at"],
+            "last_video_url": f"https://youtube.com/watch?v={channel_data['video_id']}",
+            "emails": ", ".join(emails) if emails else "Not found",
+            "email_count": len(emails),
+            "twitter": social_links.get("twitter", ""),
+            "instagram": social_links.get("instagram", ""),
+            "discord": social_links.get("discord", ""),
+            "tiktok": social_links.get("tiktok", ""),
+            "has_business_terms": "Yes" if business_terms else "No",
+            "business_terms": ", ".join(business_terms),
+            "bio_snippet": description[:200] + "..." if len(description) > 200 else description,
+            "engagement_rate": engagement_rate_str,
+            "engagement_rate_numeric": round(engagement_numeric, 2),
+            "avg_views_per_video": metrics["avg_views_per_video"],
+            "avg_likes_per_video": metrics["avg_likes_per_video"],
+            "upload_frequency_days": metrics["upload_frequency_days"],
+            "upload_consistency": metrics["upload_consistency"],
+            "indie_sentiment": sentiment_analysis["sentiment"],
+            "indie_sentiment_score": sentiment_analysis["score"],
+            "indie_sentiment_indicators": ", ".join(sentiment_analysis["indicators"])
+        }
 
-            processed.append(influencer_data)
+        response_analysis = calculate_response_likelihood(influencer_data)
+        influencer_data["response_likelihood"] = response_analysis["likelihood"]
+        influencer_data["response_score"] = response_analysis["score"]
+        influencer_data["response_factors"] = " | ".join(response_analysis["factors"])
 
-        time.sleep(0.05)
+        influencer_data["icebreaker"] = generate_icebreaker(
+            platform="YouTube",
+            name=details["title"],
+            recent_video=channel_data["video_title"],
+            subscriber_count=details["subscriber_count"]
+        )
+
+        processed.append(influencer_data)
 
     return processed
 
@@ -456,7 +477,7 @@ def search_twitch_game_id(access_token: str, client_id: str, game_name: str) -> 
     return None
 
 
-def get_twitch_streamers_by_game(access_token: str, client_id: str, game_id: str, days: int = 30) -> List[Dict]:
+def get_twitch_streamers_by_game(access_token: str, client_id: str, game_id: str, days: int = 60) -> List[Dict]:
     """Get streamers who played a specific game recently"""
     url = "https://api.twitch.tv/helix/videos"
 
@@ -467,8 +488,10 @@ def get_twitch_streamers_by_game(access_token: str, client_id: str, game_id: str
 
     params = {
         "game_id": game_id,
-        "first": 300,
-        "type": "archive"
+        "first": 100,  # Changed from 300 to 100 (max allowed)
+        "type": "archive",
+        "sort": "time",  # Add this
+        "period": "month"  # Add this - gets videos from last month
     }
 
     response = requests.get(url, headers=headers, params=params)
@@ -478,21 +501,28 @@ def get_twitch_streamers_by_game(access_token: str, client_id: str, game_id: str
     if response.status_code == 200:
         data = response.json()
 
+        print(f"     API returned {len(data.get('data', []))} total videos")  # Debug line
+
         for video in data.get("data", []):
             created_at = datetime.fromisoformat(video["created_at"].replace("Z", "+00:00"))
             days_old = (datetime.now(created_at.tzinfo) - created_at).days
 
             if days_old <= days:
-                streamers.append({
-                    "user_id": video["user_id"],
-                    "user_name": video["user_name"],
-                    "video_title": video["title"],
-                    "video_url": video["url"],
-                    "created_at": video["created_at"],
-                    "view_count": video["view_count"],
-                    "game_name": video.get("game_name", ""),
-                    "platform": "twitch"
-                })
+                streamers.append(
+                    {
+                        "user_id": video["user_id"],
+                        "user_name": video["user_name"],
+                        "video_title": video["title"],
+                        "video_url": video["url"],
+                        "created_at": video["created_at"],
+                        "view_count": video["view_count"],
+                        "game_name": video.get("game_name", ""),
+                        "platform": "twitch"
+                    }
+                )
+    else:
+        print(f"     Twitch API error: {response.status_code}")
+        print(f"     Response: {response.text[:200]}")  # Debug line
 
     return streamers
 

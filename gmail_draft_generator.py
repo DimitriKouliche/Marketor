@@ -114,7 +114,7 @@ def generate_email_content(influencer: Dict, steam_key: str) -> Dict[str, str]:
     """
     name = influencer.get('display_name') or influencer.get('username', 'there')
     platform = influencer.get('platform', 'YouTube')
-    followers = influencer.get('followers', 0)
+    followers = int(influencer.get('followers', 0))
     last_video = influencer.get('last_video_title', 'recent content')
     last_game = influencer.get('last_game_played', '')
 
