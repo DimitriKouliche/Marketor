@@ -12,9 +12,9 @@ from typing import List, Dict, Optional
 import time
 
 # ============= CONFIGURATION =============
-YOUTUBE_API_KEY = "YOUR_YOUTUBE_API_KEY"
-TWITCH_CLIENT_ID = "YOUR_TWITCH_CLIENT_ID"
-TWITCH_CLIENT_SECRET = "YOUR_TWITCH_CLIENT_SECRET"
+YOUTUBE_API_KEY = "AIzaSyAiXWof6pjjAHnt9onsuz969Tmj290ThSQ"
+TWITCH_CLIENT_ID = "vcvmc94k7xfh8tatakd7ks0lkueq7x"
+TWITCH_CLIENT_SECRET = "emikzgib190b3kevk6uk3nqcx7htha"
 
 MIN_FOLLOWERS = 500
 MAX_FOLLOWERS = 100000

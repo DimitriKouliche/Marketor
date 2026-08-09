@@ -1,8 +1,9 @@
 [tool.poetry]
 name = "marketor"
-version = "0.1.0"
-description = "Influencer discovery and outreach automation for This is no cave"
-authors = ["Your Name <your.email@example.com>"]
+version = "0.2.0"
+description = "Influencer outreach and automated shorts pipeline for This is no cave"
+authors = ["Dimitri Kouliche <d.kouliche@gmail.com>"]
+packages = [{ include = "marketor" }]
 
 [tool.poetry.dependencies]
 python = "^3.10"
@@ -10,6 +11,26 @@ requests = "^2.32.0"
 google-auth-oauthlib = "^1.2.0"
 google-auth-httplib2 = "^0.2.0"
 google-api-python-client = "^2.108.0"
+# Shorts pipeline
+openai = "^1.60.0"
+numpy = "^1.26.0"
+pyyaml = "^6.0.2"
+
+# Only used by the scene-detection fallback in analysis.py, which is imported
+# lazily and degrades to "no scene cuts" when absent. Kept optional because
+# opencv has no wheel on every Python version and would otherwise block the
+# whole install. Enable with: pip install -e ".[scenes]"
+scenedetect = { version = "^0.6.4", optional = true }
+opencv-python-headless = { version = "^4.10.0", optional = true }
+
+[tool.poetry.extras]
+scenes = ["scenedetect", "opencv-python-headless"]
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3.0"
+
+[tool.poetry.scripts]
+shorts = "marketor.shorts.cli:main"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]

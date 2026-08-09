@@ -1,9 +1,12 @@
 # API Credentials
+.env
 credentials.json
 token.json
 
 # Sensitive Data
 steam_keys.txt
+keys.txt*
+*.staged-backup
 key_assignments.json
 email_tracking.json
 
@@ -14,8 +17,16 @@ email_drafts.txt
 # Backups
 backups/
 
+# Shorts pipeline — tokens, job state and rendered output
+youtube_token.json
+tiktok_token.json
+shorts.db
+shorts_work/
+shorts_out/
+
 # Python
 __pycache__/
+.venv/
 *.pyc
 *.pyo
 *.pyd
@@ -29,3 +40,8 @@ Thumbs.db
 .idea/
 
 influencers_backup.json
+
+# Source recordings — hundreds of MB each, not source code
+clips/
+strategy.md
+shorts.db-journal

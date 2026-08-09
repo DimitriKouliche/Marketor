@@ -1,0 +1,190 @@
+paths:
+  recordings: Q:\Development\Marketor\clips
+  telemetry: C:\Users\dkoul\AppData\LocalLow\monome_studio\This Is No Cave\Telemetry
+  work: Q:\Development\Marketor\shorts_work
+  output: Q:\Development\Marketor\shorts_out
+  database: Q:\Development\Marketor\shorts.db
+clip:
+  width: 1080
+  height: 1920
+  fps: 30
+  min_duration: 14.0
+  max_duration: 55.0
+  lead_in: 13.0
+  lead_out: 7.0
+  follow_action: true
+  action_gap: 6.0
+  action_min_weight: 5.0
+  quiet_lead_in: 7.0
+  lufs: -14.0
+  reframe: crop
+  track_damping: 0.85
+  tracking: true
+  track_deadzone: 0.35
+  track_smoothing: 1.5
+selection:
+  max_clips_per_video: 6
+  min_gap_between_clips: 25.0
+  max_per_event:
+    wall_near_miss: 2
+    speed_peak: 2
+    input_flurry: 2
+    grapple_attach: 2
+    shield_hit: 2
+    bonus_pickup: 1
+    checkpoint: 1
+  weights:
+    bonus_lost: 11.0
+    jelly_combo: 10.0
+    ghost_lead_change: 9.8
+    projectile_near_miss: 9.5
+    victory: 9.0
+    bonus_secured: 8.5
+    worm_near: 8.0
+    wall_near_miss: 7.0
+    speed_peak: 7.0
+    wallrun: 6.0
+    death: 5.5
+    input_flurry: 5.5
+    bonus_pickup: 5.0
+    grapple_attach: 3.0
+    powerup_pickup: 2.5
+    shield_hit: 2.0
+    checkpoint: 0.5
+  ignore_death_causes:
+  - stuck
+  fast_speed: 18.0
+copy:
+  provider: deepseek
+  model: deepseek-v4-flash
+  base_url: ''
+  api_key_env: ''
+  structured_outputs: auto
+  brand: This is no cave
+  team: monome.studio
+  pronoun: we
+  project_status: The game was released in October 2025 and is finished. It is not
+    in active development and there is no roadmap. Talk about making it in the past
+    tense.
+  prompts_file: Q:\Development\Marketor\prompts.md
+  style: devlog
+  tone: Dry, confident, a little self-deprecating. Sounds like someone who has died
+    to this exact trap 200 times and designed it themselves. Never uses hype words
+    like 'insane', 'epic' or 'you won't believe'.
+  dev_notes: []
+  hashtags:
+    tiktok:
+    - '#indiegame'
+    - '#gamedev'
+    - '#platformer'
+    instagram:
+    - '#indiegame'
+    - '#gamedev'
+    - '#indiedev'
+    - '#platformer'
+    youtube:
+    - '#shorts'
+    - '#indiegame'
+    - '#gamedev'
+    bluesky:
+    - '#indiedev'
+    - '#gamedev'
+    threads:
+    - '#indiegame'
+    - '#gamedev'
+    discord: []
+render:
+  font_file: C:\Windows\Fonts\impact.ttf
+  font_name: Impact
+  font_size: 64
+  outline: 4
+  safe_top: 0.14
+  safe_bottom: 0.2
+  caption_min_seconds: 5.0
+  caption_max_seconds: 9.0
+  letterbox_pad: 0.0
+  letterbox_zoom: 0.72
+  crf: 23
+  preset: medium
+publish:
+  platforms:
+  - youtube
+  - tiktok
+  - instagram
+  cadence_days:
+    youtube: 2.0
+    tiktok: 2.0
+    instagram: 2.0
+  max_posts_per_platform_per_day: 2
+  youtube_client_secrets: Q:\Development\Marketor\credentials.json
+  youtube_token: Q:\Development\Marketor\youtube_token.json
+  youtube_category_id: '20'
+  youtube_privacy: public
+  tiktok_token: Q:\Development\Marketor\tiktok_token.json
+  tiktok_privacy: SELF_ONLY
+  instagram_user_id: ''
+  hosting:
+    backend: github_release
+    github_repo: ''
+    github_release_tag: shorts-hosting
+    public_base_url: ''
+experiments:
+  enabled: true
+  hashtag_variants:
+    tiktok:
+      broad:
+      - '#indiegame'
+      - '#gamedev'
+      - '#platformer'
+      niche:
+      - '#indiedev'
+      - '#pixelart'
+      - '#speedrun'
+    instagram:
+      broad:
+      - '#indiegame'
+      - '#gamedev'
+      - '#indiedev'
+      - '#platformer'
+      niche:
+      - '#pixelart'
+      - '#gamedevdiary'
+      - '#indiegamedev'
+    youtube:
+      broad:
+      - '#shorts'
+      - '#indiegame'
+      - '#gamedev'
+      niche:
+      - '#shorts'
+      - '#pixelart'
+      - '#indiedev'
+    bluesky:
+      broad:
+      - '#indiedev'
+      - '#gamedev'
+      niche:
+      - '#screenshotsaturday'
+      - '#pixelart'
+    threads:
+      broad:
+      - '#indiegame'
+      - '#gamedev'
+      niche:
+      - '#pixelart'
+      - '#indiedev'
+    discord:
+      none: []
+  min_samples: 5
+orchestrator:
+  enabled: true
+  provider: openai
+  model: gpt-5.6-terra
+  autopost: false
+  proofread: true
+  manual_platforms: []
+  memory_file: Q:\Development\Marketor\strategy.md
+  history_limit: 40
+  allow_weight_changes: true
+ffmpeg: ffmpeg
+ffprobe: ffprobe
