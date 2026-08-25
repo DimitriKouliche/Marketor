@@ -41,6 +41,16 @@ class YouTubePublisher:
                 "client (Desktop app) in Google Cloud Console with the YouTube "
                 "Data API v3 enabled and download it there"
             )
+
+        # Say so when the next run will open a browser. This used to report a
+        # bare "ok", and the consent screen then arrived unannounced — which
+        # matters when several Google accounts are signed in, because the
+        # channel it binds to is whichever one happens to be active.
+        if not cfg.publish.youtube_token.exists():
+            return True, (
+                "credentials ok — first post opens a browser to authorise; "
+                "sign in as the channel owner"
+            )
         return True, ""
 
     def _credentials(self, cfg: Config):

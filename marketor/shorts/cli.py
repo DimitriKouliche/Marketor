@@ -23,6 +23,7 @@ import sys
 from pathlib import Path
 
 from . import copywriter, db, env, ingest, learn, manual, metrics, orchestrator
+from . import tiktok_auth
 from . import prompts, publish, qc
 from . import config as config_module
 from . import render, select
@@ -291,6 +292,40 @@ def cmd_learn(args: argparse.Namespace) -> int:
     return learn.report(_cfg(args), apply=args.apply)
 
 
+def cmd_auto(args: argparse.Namespace) -> int:
+    """
+    The whole pipeline, end to end: new recordings in, posts out.
+
+    `run` turns recordings into finished clips; `orchestrate` decides what goes
+    where. Neither is useful alone on a schedule — generating clips nobody
+    posts, or planning against a queue nobody refilled — so this is the command
+    a scheduled task should call.
+
+    Safe to run when nothing has changed. Each stage no-ops on an empty queue,
+    and the cadence gate means a planner run with nothing due simply posts
+    nothing.
+    """
+    cfg = _cfg(args)
+
+    print("=" * 60)
+    print("1/2  Processing recordings")
+    print("=" * 60)
+    for step in (cmd_ingest, cmd_select, cmd_write, cmd_render, cmd_qc):
+        code = step(args)
+        if code != 0:
+            # A failed stage means the queue is in an unknown state; planning
+            # on top of that is how a half-rendered clip gets posted.
+            print("")
+            print(f"!! {step.__name__} failed — not planning this run")
+            return code
+
+    print("")
+    print("=" * 60)
+    print("2/2  Planning and publishing")
+    print("=" * 60)
+    return cmd_orchestrate(args)
+
+
 def cmd_orchestrate(args: argparse.Namespace) -> int:
     cfg = _cfg(args)
 
@@ -344,6 +379,54 @@ def cmd_record(args: argparse.Namespace) -> int:
         url=args.url, metric=args.metric,
     )
     return 0 if ok else 1
+
+
+def cmd_tiktok_auth(args: argparse.Namespace) -> int:
+    cfg = _cfg(args)
+    print("TikTok authorisation")
+    if not tiktok_auth.authorise(cfg):
+        return 1
+    print("")
+    print("Checking what the audit allows...")
+    _report_tiktok_status(cfg)
+    return 0
+
+
+def _report_tiktok_status(cfg: Config) -> None:
+    """
+    Reads back what the account may actually post.
+
+    privacy_level_options is the honest signal for audit state: an unaudited
+    app only ever gets SELF_ONLY, whatever the portal says.
+    """
+    from .publishers.tiktok import TikTokPublisher
+
+    try:
+        publisher = TikTokPublisher()
+        info = publisher._creator_info(publisher._token(cfg))
+    except Exception as exc:
+        print(f"  !! could not read creator info: {str(exc)[:300]}")
+        return
+
+    import os
+
+    options = info.get("privacy_level_options") or []
+    sandbox = os.environ.get("TIKTOK_CLIENT_KEY", "").startswith("sbaw")
+
+    print(f"  creator        : {info.get('creator_nickname') or '(unknown)'}")
+    print(f"  environment    : {'SANDBOX' if sandbox else 'production'}")
+    print(f"  privacy options: {', '.join(options) or '(none returned)'}")
+
+    if sandbox:
+        # A sandbox reports the full option set regardless of review state, so
+        # reading it as an audit result is wrong — it says the plumbing works,
+        # nothing about whether production may post publicly.
+        print("  -> sandbox always reports full options; this says the")
+        print("     integration works, NOT that the audit has passed.")
+    elif options and options != ["SELF_ONLY"]:
+        print("  -> audit PASSED: public posting is available")
+    else:
+        print("  -> audit NOT passed: every post is forced to SELF_ONLY")
 
 
 def cmd_publish(args: argparse.Namespace) -> int:
@@ -415,6 +498,15 @@ def build_parser() -> argparse.ArgumentParser:
                      help="fold clip-type performance into selection weights")
     lrn.set_defaults(func=cmd_learn)
 
+    auto = sub.add_parser(
+        "auto", help="everything: process recordings, then plan and post")
+    auto.add_argument("--post", action="store_true",
+                      help="publish even if autopost is off")
+    auto.add_argument("--dry-run", action="store_true",
+                      help="plan only; change nothing")
+    auto.add_argument("--limit", type=int, default=None)
+    auto.set_defaults(func=cmd_auto)
+
     orc = sub.add_parser("orchestrate", help="let the planner decide and post")
     orc.add_argument("--post", action="store_true",
                      help="publish the plan even if autopost is off")
@@ -434,6 +526,9 @@ def build_parser() -> argparse.ArgumentParser:
     rec.add_argument("--metric", type=int,
                      help="performance number, for the learning loop")
     rec.set_defaults(func=cmd_record)
+
+    tta = sub.add_parser("tiktok-auth", help="authorise TikTok and read audit status")
+    tta.set_defaults(func=cmd_tiktok_auth)
 
     pub = sub.add_parser("publish", help="post approved clips")
     pub.add_argument("--dry-run", action="store_true", help="show what would post")

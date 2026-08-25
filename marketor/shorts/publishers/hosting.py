@@ -18,6 +18,32 @@ from .base import PublishError
 GITHUB_API = "https://api.github.com"
 
 
+def check(cfg: Config) -> tuple[bool, str]:
+    """
+    Whether hosting could serve a video, without uploading one.
+
+    Instagram fetches the file from a URL rather than accepting an upload, so a
+    missing token here fails the post halfway through — after the render, after
+    the caption, with the clip already marked in flight. Reporting it alongside
+    the credentials means `publish --check` tells the whole truth.
+    """
+    backend = cfg.publish.hosting.backend
+
+    if backend == "public_url":
+        if not cfg.publish.hosting.public_base_url.strip():
+            return False, "hosting.public_base_url is empty"
+        return True, ""
+
+    if backend == "github_release":
+        if not os.environ.get("GITHUB_TOKEN"):
+            return False, "GITHUB_TOKEN not set (needs 'contents: write'); Instagram fetches the video from a URL"
+        if not cfg.publish.hosting.github_repo.strip():
+            return False, "hosting.github_repo is empty; set it to 'owner/repo'"
+        return True, ""
+
+    return False, f"unknown hosting backend {backend!r}"
+
+
 def public_url_for(cfg: Config, video: Path) -> str:
     backend = cfg.publish.hosting.backend
 

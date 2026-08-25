@@ -121,11 +121,11 @@ publish:
   youtube_category_id: '20'
   youtube_privacy: public
   tiktok_token: Q:\Development\Marketor\tiktok_token.json
-  tiktok_privacy: SELF_ONLY
-  instagram_user_id: ''
+  tiktok_privacy: PUBLIC_TO_EVERYONE
+  instagram_user_id: '28191667613827029'
   hosting:
     backend: github_release
-    github_repo: ''
+    github_repo: DimitriKouliche/Marketor
     github_release_tag: shorts-hosting
     public_base_url: ''
 experiments:
@@ -180,9 +180,10 @@ orchestrator:
   enabled: true
   provider: openai
   model: gpt-5.6-terra
-  autopost: false
+  autopost: true
   proofread: true
-  manual_platforms: []
+  manual_platforms:
+  - tiktok
   memory_file: Q:\Development\Marketor\strategy.md
   history_limit: 40
   allow_weight_changes: true
