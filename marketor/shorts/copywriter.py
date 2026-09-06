@@ -385,7 +385,16 @@ def write_copy(
     except ImportError:
         return _fallback(context, cfg)
 
-    client = OpenAI(api_key=api_key, base_url=provider["base_url"])
+    client = OpenAI(
+        api_key=api_key,
+        base_url=provider["base_url"],
+        # Bounded, because this runs unattended behind a lock. A request
+        # that never returns freezes the pipeline, and the lock then
+        # blocks every scheduled run behind it — measured once, a hung
+        # call held the lock for two hours and cost the day's posts.
+        timeout=cfg.copy.request_timeout,
+        max_retries=2,
+    )
 
     user_content = _describe(context)
 
@@ -489,7 +498,9 @@ def write_copy(
     # Mechanics only, on the stronger model. Applied here rather than at the
     # call sites so the rewrite path gets it too, and before the caller stores
     # anything: a typo burned into a video costs a re-render to fix.
-    proofread.check(cfg, copy)
+    # The clip's event log goes with it: an editor that can see what happened
+    # can repair a line that does not make sense, instead of only its spelling.
+    proofread.check(cfg, copy, context=context)
 
     return copy
 
@@ -589,6 +600,13 @@ def write_pending(cfg: Config, *, limit: int | None = None, verbose: bool = True
                     clip["id"],
                 ),
             )
+            # Per clip, not once at the end. A single transaction over sixty
+            # model calls means an hour of work is invisible while it happens
+            # and lost entirely if anything interrupts it — and invisible
+            # progress reads exactly like a hung process, which is how a
+            # working run came to be killed twice.
+            conn.commit()
+
             written += 1
             if verbose:
                 print(f"  + clip {clip['id']}:")

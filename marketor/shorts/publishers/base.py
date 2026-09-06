@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -20,8 +21,29 @@ class PostCopy:
     hashtags: list[str] = field(default_factory=list)
 
     @property
+    def unique_hashtags(self) -> list[str]:
+        """
+        The tag list with anything already in the caption removed.
+
+        The writer puts hashtags inside the caption where they read as part of
+        the sentence, and the planner supplies a set to append. Neither knows
+        about the other, so the same tag arrives twice and the post ends on a
+        visible stutter. Matching is case-insensitive because #ThisIsNoCave and
+        #thisisnocave are one tag to every platform here.
+        """
+        seen = {t.lower() for t in re.findall(r"#\w+", self.caption)}
+        out: list[str] = []
+        for tag in self.hashtags:
+            key = tag.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(tag)
+        return out
+
+    @property
     def caption_with_tags(self) -> str:
-        tags = " ".join(self.hashtags)
+        tags = " ".join(self.unique_hashtags)
         return f"{self.caption}\n\n{tags}".strip() if tags else self.caption
 
 

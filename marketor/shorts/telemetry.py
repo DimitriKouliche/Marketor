@@ -130,7 +130,54 @@ def load_session(path: Path) -> Session:
                 continue
 
     events.sort(key=lambda e: e.t)
+    _discount_paused_time(events)
     return Session(path=path, events=events)
+
+
+#: Durations the game measured on an unscaled clock. The power-up screen freezes
+#: play with timeScale = 0, so a menu opened mid-action was counted as part of
+#: the action: a two second wall-run with a choice in the middle was logged as
+#: twenty, and the copy writer duly reported twenty seconds of wall-running.
+#: Fixed in the game, but every recording made before that carries the inflated
+#: numbers, and those recordings are not going to be made again.
+_PAUSED_DURATION_FIELDS = {
+    "wallrun": "duration",
+    "bonus_lost": "held_seconds",
+}
+
+
+def _discount_paused_time(events: list[Event]) -> None:
+    """Subtracts menu time from durations that were measured through it."""
+    pauses: list[tuple[float, float]] = []
+    opened: float | None = None
+    for event in events:
+        if event.name == "menu_open":
+            opened = event.t
+        elif event.name == "menu_close" and opened is not None:
+            pauses.append((opened, event.t))
+            opened = None
+
+    if not pauses:
+        return
+
+    for event in events:
+        field = _PAUSED_DURATION_FIELDS.get(event.name)
+        if field is None:
+            continue
+        try:
+            duration = float(event.data.get(field))
+        except (TypeError, ValueError):
+            continue
+        if duration <= 0:
+            continue
+
+        # The event is logged when the action ends, so it spans back from there.
+        began = event.t - duration
+        paused = sum(
+            max(0.0, min(event.t, b) - max(began, a)) for a, b in pauses
+        )
+        if paused > 0.05:
+            event.data[field] = round(max(0.0, duration - paused), 3)
 
 
 def find_sessions(directory: Path) -> list[Session]:

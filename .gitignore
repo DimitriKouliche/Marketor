@@ -45,3 +45,17 @@ influencers_backup.json
 clips/
 strategy.md
 shorts.db-journal
+
+# Journal d'execution, peut contenir des URLs et des messages d'erreur d'API
+marketor.log
+
+# Verrou de pipeline, purement local
+shorts.lock
+
+# Toute variante de .env, y compris les sauvegardes : une seule qui echappe
+# au filtre suffit, et le depot est public.
+.env*
+
+clips_processed/
+
+reddit_out/

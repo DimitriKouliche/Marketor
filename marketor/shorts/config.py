@@ -51,6 +51,16 @@ class Paths:
     output: Path = REPO_ROOT / "shorts_out"
     database: Path = REPO_ROOT / "shorts.db"
 
+    # Recordings are moved here once every clip cut from them has been
+    # rendered. The database already refuses to ingest a known path, but that
+    # guarantee dies with the database — and `regen --full` deletes it, which
+    # is how six recordings once got reprocessed from scratch. Moving the file
+    # makes "already done" a fact on disk rather than a row in a table.
+    #
+    # A sibling of `recordings`, never a subdirectory: discovery walks
+    # recursively, so an archive inside it would be picked straight back up.
+    archive: Path = REPO_ROOT / "clips_processed"
+
     def ensure(self) -> None:
         for p in (self.work, self.output):
             p.mkdir(parents=True, exist_ok=True)
@@ -67,8 +77,11 @@ class ClipConfig:
     """
 
     width: int = 1080
-    height: int = 1920
-    fps: int = 30
+    height: int = 1350
+    # 60, not 30. The recordings are 60 and the game is a fast platformer:
+    # halving the rate is visible as judder on exactly the footage worth
+    # posting, and every target platform accepts 60.
+    fps: int = 60
 
     # The floor has to clear the caption plan: two beats at five seconds each,
     # plus room either side. Below this the planner starts dropping lines.
@@ -129,18 +142,106 @@ class ClipConfig:
     # without a deadzone the crop chases every bounce, and in a game built on
     # bouncing it ends up mirroring the oscillation. At 0.35 the player can move
     # freely through the middle 70% of frame and the camera simply holds.
-    track_deadzone: float = 0.35
+    # 0.40, not 0.20. A tighter deadzone means the camera answers every small
+    # movement, and measured on the output the picture reversed direction 21
+    # times in four seconds — a shimmer, not a pan. At 0.40 with heavier
+    # smoothing that falls to 2, against 0 for a locked camera, and it costs
+    # nothing: with the 4:5 window the player never leaves frame either way,
+    # while average camera travel drops from 583px to 123px.
+    track_deadzone: float = 0.60
 
     # Seconds of moving average applied to player position before following.
     # Removes sample noise; raise it if the camera still feels busy.
-    track_smoothing: float = 1.5
+    track_smoothing: float = 2.0
+
+    # How far into the crop the player may drift before the camera is forced to
+    # contain them, as a fraction of the half-width. Everything else about the
+    # tracking is a preference; this is the guarantee.
+    #
+    # Measured on real footage: the player outruns the pan limit 40% of the
+    # time, so smoothing alone cannot keep them framed. 0.86 leaves a 14% band
+    # at each edge that the player never enters, which reads as headroom rather
+    # than as the camera being dragged.
+    track_safe_fraction: float = 0.86
+
+    # Ceiling on the containment correction, in source pixels per second. Well
+    # above the ordinary follower's limit, so it only engages when the player is
+    # escaping — but finite, because an unbounded correction produced 725px
+    # single-frame jumps that read as the camera being yanked. At 700 the worst
+    # case is 24px per frame: a firm pan, not a whip.
+    track_rescue_px_per_s: float = 700.0
+
+    # Widen the crop on clips where the player's range will not fit the 9:16
+    # window, and letterbox the result rather than losing them off the side.
+    #
+    # Measured over 124 windows of 20s: the player's span is 730px at the
+    # median and 1344px at p90, against a 608px window. The follower can cover
+    # some of that by panning; past a point it simply cannot, and the choice is
+    # between a smaller picture and an absent player.
+    widen_when_needed: bool = True
+    #: Fraction of the measured span the window itself should cover; the rest is
+    #: left to the camera. 1.0 would freeze the camera and letterbox everything.
+    widen_coverage: float = 0.80
+    #: Never widen past this share of the source, or the gameplay ends up a
+    #: strip in the middle of the frame.
+    widen_max_fraction: float = 0.72
+
+    # Slow push in over the clip, as a fraction. 0.04 is a 4% creep — below the
+    # threshold anyone notices deliberately, above the threshold it stops
+    # feeling like a static recording.
+    # Off. zoompan samples on whole pixels, so a zoom that is never exactly 1
+    # resamples the picture continuously: measured on a deliberately frozen
+    # source, a 4% push over the clip made 18% of frames shimmer, against 1
+    # frame in 395 with no zoom at all. The punch below is worth its artefact
+    # because it lasts two seconds and lands on the loudest moment in the clip;
+    # a drift nobody consciously notices is not.
+    zoom_push: float = 0.0
+    # Extra zoom at the triggering moment, on top of the push. The telemetry
+    # knows when it happens, so the camera can lean in for it.
+    zoom_punch: float = 0.05
+    #: Width of that lean, in seconds either side of the event.
+    zoom_punch_seconds: float = 1.1
+
+    # A clip covers one attempt. It may end on a death or a victory — that is
+    # the ending — but nothing after it, and it may not open inside the respawn
+    # fade of the previous one.
+    death_tail: float = 0.40      # 24 frames: reads the death, misses the respawn
+    victory_tail: float = 1.6     # nothing follows a win, so it can breathe
+    respawn_margin: float = 5.2   # measured: the fade runs ~5s past a death
+
+    # Margins around a scene change. The level_start event fires when the new
+    # scene finishes loading, but the picture has already been changing for a
+    # moment by then — a fade, a results screen — and the telemetry clock is
+    # only aligned to the video to within about a second when the alignment
+    # comes from the filename. Half a second of margin sits inside that error,
+    # which is how the start of the next level ends up at the end of a clip.
+    level_end_margin: float = 2.5
+    level_start_margin: float = 1.5
+
+    # Endless mode. The clip has to show enough of the run for the escalation
+    # to be legible, which a twenty second cut is not.
+    endless_lead_in: float = 22.0
+    endless_min_duration: float = 24.0
+
+    # Seconds the last frame is held at the end. The closing caption is the one
+    # that decides whether a viewer replays; cutting on it wastes it.
+    freeze_end: float = 0.6
 
 
 @dataclass
 class SelectionConfig:
     """What counts as a highlight, and how many to keep."""
 
-    max_clips_per_video: int = 6
+    # Target density. The budget for a recording is its length divided by this,
+    # bounded by the two below — so a long session yields more than a short one
+    # instead of the same flat handful.
+    minutes_per_clip: float = 2.0
+    min_clips_per_video: int = 3
+    max_clips_per_video: int = 14
+
+    # Recording length at which the per-event caps below are worth exactly what
+    # they say; longer recordings scale them up in proportion.
+    cap_scale_minutes: float = 10.0
 
     # Two clips from the same stretch of footage look like duplicates on a feed.
     min_gap_between_clips: float = 25.0
@@ -153,6 +254,11 @@ class SelectionConfig:
     # Uncapped event types are unaffected.
     max_per_event: dict[str, int] = field(
         default_factory=lambda: {
+            # Capped like the other frequent ones: raising its weight on a
+            # judgement call made it 44% of the catalogue.
+            "bonus_near_miss": 2,
+            "wallrun": 2,
+            "burst": 2,
             "wall_near_miss": 2,
             "speed_peak": 2,
             "input_flurry": 2,
@@ -170,6 +276,12 @@ class SelectionConfig:
             # produces: a visible risk, taken deliberately, that did not pay
             # off. Nothing else in the log has a motive attached.
             "bonus_lost": 11.0,
+            # Wavebursting: a burst aimed along the wall-jump direction while
+            # wall-running, compounding speed instead of redirecting it. The
+            # game reports it explicitly because nothing else in the log tells
+            # it apart from an ordinary wall-run, and it is the clearest
+            # evidence of someone who knows the movement system.
+            "waveburst": 10.5,
             "jelly_combo": 10.0,
             # Racing your own previous run. The stakes are legible on screen
             # with no explanation, which almost nothing else here manages.
@@ -179,13 +291,30 @@ class SelectionConfig:
             "projectile_near_miss": 9.5,
             "victory": 9.0,
             "bonus_secured": 8.5,
+            # Reaching for a diamond and coming away without it. The detour is
+            # a decision the player made, off the safe route, and losing it
+            # reads better on screen than a clean pickup.
+            "bonus_near_miss": 8.0,
             "worm_near": 8.0,
             "wall_near_miss": 7.0,
             "speed_peak": 7.0,
-            "wallrun": 6.0,
+            # Judged by eye against real output: a wall-run sequence carrying
+            # the movement tech was the best clip in the bottom twelve, above
+            # several speed peaks. It ranked low because the log makes a skilled
+            # wall-run and a routine one look identical — which is what the
+            # waveburst event above now fixes at the source.
+            "wallrun": 7.0,
             "death": 5.5,
             "input_flurry": 5.5,
             "bonus_pickup": 5.0,
+            # Frequent and low on its own, but it is what makes a burst-and-
+            # wall-run sequence visible to the scorer at all.
+            # A single burst is nothing; a window full of them taken off
+            # walls is the densest footage the game produces, and judged
+            # by eye it beat clips scoring six times higher. Capped below
+            # so it cannot flood the catalogue.
+            "powerup_chosen": 0.0,
+            "burst": 7.0,
             "grapple_attach": 3.0,
             "powerup_pickup": 2.5,
             "shield_hit": 2.0,
@@ -193,8 +322,63 @@ class SelectionConfig:
         }
     )
 
+    # Scenes the game loads that are not gameplay. level_start fires for these
+    # too, so without the list a menu or a cinematic can anchor a clip.
+    ignore_scenes: list[str] = field(
+        default_factory=lambda: [
+            "main menu", "psascreen", "introcinematic", "endgamescreen",
+            "credits", "title",
+        ]
+    )
+
+    endless_scenes: list[str] = field(default_factory=lambda: ["endless"])
+
+    # Retry loops. Dying repeatedly in one spot generates a dense event log and
+    # nothing anyone wants to watch, so it is scored down rather than up.
+    retry_tolerance: int = 2      # deaths in a window before the penalty starts
+    retry_penalty: float = 0.6    # strength of the penalty per extra death
+    max_deaths_per_clip: int = 4  # above this the window is not a candidate
+
     # Deaths from being wedged in geometry are a bug report, not a highlight.
     ignore_death_causes: list[str] = field(default_factory=lambda: ["stuck"])
+
+    # Seconds a count is normalised to. Bonuses are computed per this much
+    # footage, so a long clip stops out-scoring a short one for being long.
+    rate_window: float = 20.0
+
+    # Windows where the player was not playing. Speed below idle_speed counts
+    # as motionless; past max_idle_fraction of the window, nobody was at the
+    # controls and the events are the level killing an absent player.
+    idle_speed: float = 1.0
+    max_idle_fraction: float = 0.60
+
+    # A near miss counts as a dodge only if nothing hit the player within this
+    # many seconds of it, before or after, and only if it actually missed: the proximity tracker
+    # reports the closest approach, and a contact shows up as distance zero.
+    near_miss_damage_guard: float = 2.0
+    near_miss_min_distance: float = 0.15
+
+    # Screen pressure. hazard_bonus applies per hazard on screen past three,
+    # from the game's own count; near_miss_bonus is the proxy that works on
+    # recordings made before that count existed.
+    hazard_bonus: float = 0.06
+    near_miss_bonus: float = 0.05
+
+    # Each burst taken off a wall lifts the window by this much, up to ten.
+    wall_burst_bonus: float = 0.10
+
+    # Two clips from the same corner of the same level are the same clip to a
+    # viewer, however far apart they were played. In world units.
+    # Measured across the catalogue: clips from the same level sit 828 units
+    # apart at the median, so most are genuinely different sections. The
+    # duplicates cluster under 100 — four clips of one LVL08 passage came in
+    # between 40 and 90 units of each other and all survived a radius of 30.
+    same_spot_radius: float = 100.0
+
+    # A speed peak within this many seconds of a gas explosion is the gas
+    # doing the work. Still footage worth having, just not a feat.
+    gas_speed_window: float = 4.0
+    gas_speed_discount: float = 0.55
 
     # Player speed (units/sec) that counts as "fast" when scoring a window.
     fast_speed: float = 18.0
@@ -239,6 +423,9 @@ class CopyConfig:
     # per-mechanic angle sheet — those lived here and in shorts.yaml, and the
     # copy came out sounding like it was working through a checklist. Add facts
     # to the `studio` section; do not add rules.
+    # Seconds a single model call may take before it is abandoned.
+    request_timeout: float = 120.0
+
     prompts_file: Path = REPO_ROOT / "prompts.md"
     hashtags: dict[str, list[str]] = field(
         default_factory=lambda: {
@@ -285,6 +472,16 @@ class RenderConfig:
     # lingering after the menu has gone. Accuracy comes from aligning the two
     # clocks properly instead — see `refine_with_menus` in ingest.py.
     letterbox_pad: float = 0.0
+
+    # Brought forward by this much, and only at the start. The overlay switches
+    # in one frame, so landing 0.11s after the menu appears is visible; landing
+    # 0.04s before it is not.
+    letterbox_lead: float = 0.15
+
+    # Held this much past the measured freeze. The picture resumes when the game
+    # unfreezes, but the cards animate out over the next 0.4s and the frame is
+    # still theirs until they are gone.
+    letterbox_trail: float = 0.40
 
     # Fraction of the source width kept when letterboxing a menu. 1.0 shows the
     # whole 16:9 frame; the power-up cards only reach 57% of it, and their
@@ -376,6 +573,9 @@ class OrchestratorConfig:
     # Notes the planner writes to itself and reads back on the next run. This is
     # how a strategy survives across months of separate invocations, rather than
     # every run starting from nothing.
+    # Seconds a single model call may take before it is abandoned.
+    request_timeout: float = 120.0
+
     memory_file: Path = REPO_ROOT / "strategy.md"
 
     #: How many past posts of performance data to summarise into the prompt.
@@ -415,11 +615,19 @@ class PublishConfig:
     # Minimum days between posts on each platform. The queue skips a platform
     # until this much time has passed since its last successful post, so a
     # backlog of ready clips drains at a steady rate instead of all at once.
+    # 1.75 days is 42 hours. Deliberately not a whole number of days: a whole
+    # one pins every post to the same hour, and a feed that publishes at exactly
+    # 18:00 every other day is reading as a scheduler to anyone paying
+    # attention. 42 walks the slot around the clock instead.
+    # A temporary burst that overrides the cadence, with its own end date so it
+    # switches itself off. Empty or a past date means no promotion.
+    promo: dict[str, Any] = field(default_factory=dict)
+
     cadence_days: dict[str, float] = field(
         default_factory=lambda: {
-            "youtube": 2.0,
-            "tiktok": 2.0,
-            "instagram": 2.0,
+            "youtube": 1.75,
+            "tiktok": 1.75,
+            "instagram": 1.75,
         }
     )
 
@@ -436,11 +644,61 @@ class PublishConfig:
     tiktok_token: Path = REPO_ROOT / "tiktok_token.json"
     #: Forced to SELF_ONLY until your app passes TikTok's audit.
     tiktok_privacy: str = "SELF_ONLY"
+    #: "inbox" uploads to drafts for the creator to post (no audit
+    #: needed, no caption carried); "direct" posts to the profile and
+    #: needs an audited app, which TikTok refused us.
+    tiktok_mode: str = "inbox"
 
     #: Instagram Business/Creator account id (numeric), from the Graph API.
     instagram_user_id: str = ""
 
     hosting: HostingConfig = field(default_factory=HostingConfig)
+
+
+@dataclass
+class RedditConfig:
+    """
+    A second output profile, for a different audience and a different feed.
+
+    Reddit is read on a desktop by people who play on one. A 4:5 clip there
+    sits in a narrow column with empty space either side, which reads as
+    something made for a phone and reposted — the exact impression to avoid
+    when the point is reaching PC players. 4:3 is cropped from the 1920x1080
+    source at 1440x1080, so it uses three quarters of the frame width against
+    the 864 px the vertical cut keeps, and never upscales.
+
+    Nothing here posts. It produces a small pile of finished files and a
+    manifest; a person picks where each one goes.
+    """
+
+    #: 1440x1080 is 4:3; 1080x1080 is square. Both crop from the source
+    #: without upscaling, which is why neither costs any sharpness.
+    width: int = 1440
+    height: int = 1080
+
+    #: How many clips to keep, out of everything every recording offers.
+    #: The vertical feed wants volume; this wants the highlights only.
+    count: int = 10
+
+    # Longer than the vertical cut. There are no captions to read here and no
+    # thumb waiting to scroll, so a moment can be given its run-up and its
+    # aftermath instead of being trimmed to the beat.
+    #: 90 was tried and every clip came out at exactly 90: the window grows
+    #: through nearby action, and with a gap that wide the action never ends.
+    #: A cap every clip reaches is not a cap, it is a fixed length.
+    min_duration: float = 22.0
+    max_duration: float = 60.0
+    lead_in: float = 14.0
+    lead_out: float = 8.0
+    action_gap: float = 7.0
+
+    # Visibly better than the feed encode, because this is watched on a large
+    # screen and often paused. crf 16 against 23 roughly triples the file,
+    # which matters not at all for ten files nobody uploads by API.
+    crf: int = 16
+    preset: str = "slow"
+
+    output: Path = REPO_ROOT / "reddit_out"
 
 
 @dataclass
@@ -453,6 +711,7 @@ class Config:
     publish: PublishConfig = field(default_factory=PublishConfig)
     experiments: ExperimentConfig = field(default_factory=ExperimentConfig)
     orchestrator: OrchestratorConfig = field(default_factory=OrchestratorConfig)
+    reddit: RedditConfig = field(default_factory=RedditConfig)
 
     ffmpeg: str = "ffmpeg"
     ffprobe: str = "ffprobe"

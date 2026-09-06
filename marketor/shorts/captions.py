@@ -93,7 +93,18 @@ def build(cfg: Config, cues: list[CaptionCue]) -> str:
 
     lines = [header]
     for cue in cues:
-        text = "{\\fad(120,120)}" + _wrap(_escape(cue.text))
+        # Fade plus a short rise into place. A line that simply appears
+        # reads as a subtitle track; one that arrives reads as something a
+        # person made. The move is over in 180ms — felt, but nobody waits
+        # for it before reading.
+        margin = int(height * r.safe_top)
+        rise = int(height * 0.012)
+        cx = cfg.clip.width // 2
+        move = (
+            r"{\fad(140,160)\move(%d,%d,%d,%d,0,180)}"
+            % (cx, margin + rise, cx, margin)
+        )
+        text = move + _wrap(_escape(cue.text))
         lines.append(
             f"Dialogue: 0,{_timestamp(cue.start)},{_timestamp(cue.end)},"
             f"{cue.style},,0,0,0,,{text}"

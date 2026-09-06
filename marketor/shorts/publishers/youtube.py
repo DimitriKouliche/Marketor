@@ -18,7 +18,14 @@ from pathlib import Path
 from ..config import Config
 from .base import PostCopy, PublishError, PublishResult
 
-SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
+# Upload is not enough on its own: reading back a video's own statistics goes
+# through videos.list, which refuses an upload-only token with "insufficient
+# authentication scopes". The metrics fetcher was written against this API and
+# had never once succeeded because of it.
+SCOPES = [
+    "https://www.googleapis.com/auth/youtube.upload",
+    "https://www.googleapis.com/auth/youtube.readonly",
+]
 
 # YouTube truncates hard at these; better to trim than to be rejected.
 MAX_TITLE = 100
@@ -94,7 +101,7 @@ class YouTubePublisher:
                 "description": copy.caption_with_tags[:MAX_DESCRIPTION],
                 "categoryId": cfg.publish.youtube_category_id,
                 # Tags are separate from in-description hashtags; strip the '#'.
-                "tags": [t.lstrip("#") for t in copy.hashtags][:15],
+                "tags": [t.lstrip("#") for t in copy.unique_hashtags][:15],
             },
             "status": {
                 "privacyStatus": cfg.publish.youtube_privacy,

@@ -73,16 +73,54 @@ CREATE INDEX IF NOT EXISTS idx_posts_state ON posts(state);
 # Columns added after the first schema shipped. SQLite has no "ADD COLUMN IF NOT
 # EXISTS", so they are applied by inspection rather than by version number.
 MIGRATIONS: dict[str, list[tuple[str, str]]] = {
+    "sources": [
+        # Menu stretches measured against the picture rather than taken from the
+        # event log, as JSON [[start, end], ...] in video seconds. The log
+        # brackets a menu more generously than the freeze it describes, so the
+        # letterbox was landing over live gameplay at both ends.
+        ("menu_windows", "TEXT"),
+    ],
     "posts": [
+        # A post made outside its promotional slot to make up for one that was
+        # missed. It belongs to the day that was lost, not the day it was sent,
+        # so it deliberately does not count against today's quota — otherwise
+        # catching up yesterday silently cancels today.
+        ("catch_up", "INTEGER DEFAULT 0"),
         # Which experiment arm this post used, e.g. "hashtags:niche|format:single".
         ("variant", "TEXT"),
         ("metrics_at", "TEXT"),
+        # What this clip *was*, snapshotted at publish time: mode, difficulty,
+        # trigger, speed, power-ups taken. Copied rather than joined because
+        # the clip it came from is not durable — re-selection renumbers every
+        # clip and recomputes every context, so a question asked in six weeks
+        # about posts made today has nothing left to join against. A post is
+        # the only row that is never rewritten.
+        ("dimensions", "TEXT"),
     ],
     "clips": [
         # Timed on-screen caption beats, as JSON [{text, at}].
         ("beats", "TEXT"),
+        # Identifies the footage itself: recording name plus rounded timecodes.
+        # The (clip, platform) unique index stops a clip being posted twice, but
+        # it lives in this database — and `regen --full` deletes it, after which
+        # the same seconds of gameplay can be republished under a new clip id.
+        # This survives that, because it is derived from the source.
+        ("fingerprint", "TEXT"),
     ],
 }
+
+
+def fingerprint(source_path: str, start_s: float, end_s: float) -> str:
+    """
+    Stable identity for a stretch of footage.
+
+    Rounded to the second on purpose: re-selection after a config change can
+    shift a boundary by a few frames, and that should still count as the same
+    moment rather than a fresh one.
+    """
+    from pathlib import Path
+
+    return f"{Path(source_path).name}@{start_s:.0f}-{end_s:.0f}"
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -100,8 +138,19 @@ def now() -> str:
 @contextmanager
 def connect(path: Path) -> Iterator[sqlite3.Connection]:
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
+    # The hourly scheduled run and a manual command can land on this file at
+    # the same time. Five seconds of default patience is not enough when the
+    # other side is halfway through writing copy for sixty clips, and the loser
+    # dies with "database is locked" partway through its own run.
+    conn = sqlite3.connect(path, timeout=60.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 60000")
+    try:
+        # Readers stop blocking the writer, which is most of the contention:
+        # the planner reads the whole queue while the renderer writes to it.
+        conn.execute("PRAGMA journal_mode = WAL")
+    except sqlite3.DatabaseError:
+        pass
     conn.execute("PRAGMA foreign_keys = ON")
     try:
         conn.executescript(SCHEMA)
@@ -123,17 +172,18 @@ def add_source(
     telemetry_path: str | None,
     offset_seconds: float | None,
     alignment: str,
+    menu_windows: str | None = None,
 ) -> int | None:
     """Registers a recording. Returns None if it was already known."""
     cur = conn.execute(
         """
         INSERT OR IGNORE INTO sources
             (path, duration, width, height, start_utc, telemetry_path,
-             offset_seconds, alignment, state, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'new', ?)
+             offset_seconds, alignment, menu_windows, state, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?)
         """,
         (path, duration, width, height, start_utc, telemetry_path,
-         offset_seconds, alignment, now()),
+         offset_seconds, alignment, menu_windows, now()),
     )
     return cur.lastrowid if cur.rowcount else None
 
@@ -148,15 +198,20 @@ def add_clip(
     trigger_event: str,
     context: dict[str, Any],
 ) -> int:
+    source = conn.execute(
+        "SELECT path FROM sources WHERE id = ?", (source_id,)
+    ).fetchone()
+    mark = fingerprint(source["path"] if source else str(source_id), start_s, end_s)
+
     cur = conn.execute(
         """
         INSERT INTO clips
             (source_id, start_s, end_s, score, trigger_event, context,
-             state, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, 'selected', ?)
+             state, created_at, fingerprint)
+        VALUES (?, ?, ?, ?, ?, ?, 'selected', ?, ?)
         """,
         (source_id, start_s, end_s, score, trigger_event,
-         json.dumps(context), now()),
+         json.dumps(context), now(), mark),
     )
     return cur.lastrowid
 

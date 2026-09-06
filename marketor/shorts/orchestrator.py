@@ -130,7 +130,27 @@ def save_memory(cfg: Config, notes: str) -> Path:
     return path
 
 
-def gather(cfg: Config) -> dict[str, Any]:
+def _mode(clip) -> str:
+    """
+    Endless or a built level, for a clip.
+
+    Endless is where the worm and the missiles are, so it produces livelier
+    footage per minute and scores higher — measured, it was a third of the play
+    time and half the top of the ranking. That is the scorer being right, not
+    wrong: more genuinely happens there. It only becomes a problem one step
+    later, when every post in a row comes from the same mode and the feed stops
+    showing the game people would actually buy.
+    """
+    try:
+        scene = (json.loads(clip["context"] or "{}") or {}).get("scene") or ""
+    except (json.JSONDecodeError, TypeError):
+        return "level"
+    return "endless" if "endless" in str(scene).lower() else "level"
+
+
+def gather(
+    cfg: Config, *, force: bool = False, only: str | None = None
+) -> dict[str, Any]:
     """Everything the planner needs to decide, and nothing it doesn't."""
     now = datetime.now(timezone.utc)
     state: dict[str, Any] = {
@@ -138,17 +158,64 @@ def gather(cfg: Config) -> dict[str, Any]:
         "weekday": now.strftime("%A"),
     }
 
+    # Platforms the planner is actually allowed to use. A clip that has been
+    # everywhere it can go is finished, and listing it again only invites the
+    # planner to waste a slot on a post that will be refused.
+    plannable = [
+        p for p in cfg.publish.platforms
+        if p not in cfg.orchestrator.manual_platforms
+    ]
+
     with db.connect(cfg.paths.database) as conn:
+        posted_to: dict[int, set[str]] = {}
+        for row in conn.execute(
+            "SELECT clip_id, platform FROM posts WHERE state = 'posted'"
+        ):
+            posted_to.setdefault(row["clip_id"], set()).add(row["platform"])
+
+        # A clip's score is only comparable to others cut from the same
+        # recording. The event log gained new signals over time — bursts,
+        # wavebursts, gas — so a session recorded after that change scores
+        # higher than an identical one recorded before it, for reasons that
+        # have nothing to do with the footage. Left raw, every older recording
+        # would sink below every newer one and quietly stop being posted.
+        #
+        # So each clip also carries where it stands inside its own recording,
+        # which is the comparison that survives the log changing under it.
+        ready = list(db.clips_in_state(conn, "ready"))
+        by_source: dict[Any, list[float]] = {}
+        for clip in ready:
+            by_source.setdefault(clip["source_id"], []).append(float(clip["score"]))
+        for scores in by_source.values():
+            scores.sort()
+
+        def standing(clip) -> int:
+            scores = by_source.get(clip["source_id"]) or []
+            if len(scores) < 2:
+                return 100
+            below = sum(1 for s in scores if s < float(clip["score"]))
+            return round(100 * below / (len(scores) - 1))
+
         # Only clips that could legally be posted.
         state["available_clips"] = [
             {
                 "clip_id": c["id"],
                 "trigger": c["trigger_event"],
+                "mode": _mode(c),
                 "score": round(float(c["score"]), 1),
+                # 0-100, against the other clips from the same recording.
+                "standing": standing(c),
                 "seconds": round(float(c["end_s"]) - float(c["start_s"]), 1),
                 "hook": c["hook"],
+                # Where this clip has already run. The rotation is the planner's
+                # to drive, so it has to be able to see it.
+                "posted_to": sorted(posted_to.get(c["id"], ())),
+                "remaining_platforms": sorted(
+                    set(plannable) - posted_to.get(c["id"], set())
+                ),
             }
-            for c in db.clips_in_state(conn, "ready")
+            for c in ready
+            if set(plannable) - posted_to.get(c["id"], set())
         ]
 
         # Which platforms are actually postable right now, and why not.
@@ -156,10 +223,30 @@ def gather(cfg: Config) -> dict[str, Any]:
         # planner that knows about a platform it may not use will keep
         # proposing it.
         platforms = {}
+        forced: set[str] = set()
         for platform in cfg.publish.platforms:
             if platform in cfg.orchestrator.manual_platforms:
                 continue
+            # Narrowing the run to one platform, so that catching up a missed
+            # slot on one account cannot spend another account's slot for the
+            # day. Omitted entirely rather than marked not-due: a planner told
+            # about a platform it may not use keeps proposing it.
+            if only and platform != only:
+                continue
             ready, reason = publish.due(conn, cfg, platform)
+            if force and not ready:
+                # Catching up a missed slot, never granting a second one. A
+                # platform that has already posted today keeps its gate: the
+                # point of the override is the slot that did not happen, and
+                # forcing a platform that already went out just burns a
+                # rotation slot on a day it did not need one.
+                already = publish.posted_today(conn, cfg, platform)
+                if already:
+                    reason = f"{reason} (deja publie aujourd'hui)".strip()
+                else:
+                    ready, reason = True, ""
+                    forced.add(platform)
+
             configured, missing = True, ""
             try:
                 from .publishers import get_publisher
@@ -170,6 +257,7 @@ def gather(cfg: Config) -> dict[str, Any]:
 
             platforms[platform] = {
                 "due": ready,
+                "catch_up": platform in forced,
                 "cadence_days": cfg.publish.cadence_days.get(platform),
                 "blocked_by": (reason or None) if not ready else None,
                 "credentials_ok": configured,
@@ -181,7 +269,9 @@ def gather(cfg: Config) -> dict[str, Any]:
         rows = conn.execute(
             """
             SELECT p.platform, p.variant, p.posted_at, p.metrics, p.url,
-                   c.trigger_event, c.hook
+                   p.clip_id, c.trigger_event, c.hook,
+                   CASE WHEN lower(c.context) LIKE '%endless%'
+                        THEN 'endless' ELSE 'level' END AS mode_scene
               FROM posts p JOIN clips c ON c.id = p.clip_id
              WHERE p.state = 'posted'
              ORDER BY p.posted_at DESC LIMIT ?
@@ -197,6 +287,8 @@ def gather(cfg: Config) -> dict[str, Any]:
                 metrics = {}
             history.append({
                 "platform": row["platform"],
+                "clip_id": row["clip_id"],
+                "mode": row["mode_scene"],
                 "posted_at": row["posted_at"],
                 "variant": row["variant"],
                 "trigger": row["trigger_event"],
@@ -246,14 +338,29 @@ def _system_prompt(cfg: Config) -> str:
         "- Only post to a platform whose `due` is true and `credentials_ok` is "
         "true.\n"
         "- At most one post per platform per run.\n"
-        "- `clip_id` must come from available_clips.\n\n"
+        "- `clip_id` must come from available_clips.\n"
+        "- Never post a clip to a platform listed in its `posted_to`.\n"
+        "- Never send the same clip to two platforms in the same run.\n\n"
+        "ROTATION. Every clip is meant to reach every platform "
+        "eventually, one platform at a time. The catalogue is finite, and "
+        "a clip already posted somewhere is not used up — it is part-way "
+        "through, and finishing it costs nothing from the pool. Prefer "
+        "clips with a short `remaining_platforms` over untouched ones of "
+        "similar quality, and keep the platforms on different clips so "
+        "the accounts do not read as one feed mirrored three times.\n\n"
         "JUDGEMENT, which is what you are actually for:\n"
         "- Do not fill a slot with weak material. An empty posts array is a "
         "valid, and often correct, answer. Score is a strong signal: anything "
-        "much below the others in available_clips is probably not worth a slot.\n"
+        "much below the others in available_clips is probably not worth a slot. "
+        "Compare `standing` rather than `score` across two different "
+        "recordings: score is only meaningful against clips cut from the "
+        "same session, because what the game logged changed over time.\n"
         "- Vary. Repeating a clip type or an angle across consecutive posts is "
         "the main way an automated account becomes obvious. Check recent_posts "
-        "before choosing.\n"
+        "before choosing. `mode` matters as much as `trigger` here: endless "
+        "runs score higher because more happens in them, so left alone they "
+        "fill the feed and it stops showing the built levels the game is "
+        "actually sold on. Alternate between the two.\n"
         "- Weigh the day of the week: weekend traffic differs from weekday.\n"
         "- Use the performance data, but only where n is at or above "
         "min_samples_before_trusting. Below that it is noise, and acting on it "
@@ -276,7 +383,10 @@ def _user_prompt(state: dict[str, Any], memory: str) -> str:
     )
 
 
-def plan(cfg: Config, *, verbose: bool = True) -> dict[str, Any] | None:
+def plan(
+    cfg: Config, *, verbose: bool = True, force: bool = False,
+    only: str | None = None,
+) -> dict[str, Any] | None:
     """Asks the planner what to do. Returns the validated plan, or None."""
     env.ensure_loaded()
 
@@ -292,8 +402,17 @@ def plan(cfg: Config, *, verbose: bool = True) -> dict[str, Any] | None:
         print("  !! openai package not installed")
         return None
 
-    client = OpenAI(api_key=api_key, base_url=preset["base_url"])
-    state = gather(cfg)
+    client = OpenAI(
+        api_key=api_key,
+        base_url=preset["base_url"],
+        # Bounded, because this runs unattended behind a lock. A request
+        # that never returns freezes the pipeline, and the lock then
+        # blocks every scheduled run behind it — measured once, a hung
+        # call held the lock for two hours and cost the day's posts.
+        timeout=cfg.orchestrator.request_timeout,
+        max_retries=2,
+    )
+    state = gather(cfg, force=force, only=only)
     memory = load_memory(cfg)
 
     if verbose:
@@ -347,6 +466,7 @@ def _enforce(
     approved: list[dict[str, Any]] = []
     rejected: list[str] = []
     used_platforms: set[str] = set()
+    used_clips: set[int] = set()
 
     for post in proposed.get("posts") or []:
         platform = str(post.get("platform", ""))
@@ -374,7 +494,23 @@ def _enforce(
             rejected.append(f"{platform}: clip {clip_id} is not available")
             continue
 
+        # The rotation, enforced rather than requested. Every clip is meant to
+        # reach every platform eventually, which only works if no platform gets
+        # the same clip twice and no two platforms get it on the same day.
+        if platform in (clip.get("posted_to") or []):
+            rejected.append(f"{platform}: clip {clip_id} already ran there")
+            continue
+        if clip_id in used_clips:
+            rejected.append(
+                f"{platform}: clip {clip_id} is already going out this run"
+            )
+            continue
+
         used_platforms.add(platform)
+        used_clips.add(clip_id)
+        # Carried from the gate, not from the planner: whether this post is a
+        # catch-up is a fact about the schedule, not a decision the model makes.
+        post["catch_up"] = bool(info.get("catch_up"))
         approved.append(post)
 
     if verbose:
@@ -441,6 +577,7 @@ def execute(cfg: Config, plan_result: dict[str, Any], *, dry_run: bool = False) 
             cfg, clip_id, platform,
             hashtags=hashtags or None,
             dry_run=dry_run,
+            catch_up=bool(post.get("catch_up")),
         )
         if ok:
             posted += 1

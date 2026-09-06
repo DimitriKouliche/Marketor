@@ -43,7 +43,8 @@ def handoff(cfg: Config, platform: str, *, clip_id: int | None = None) -> int:
 
             posted = {
                 r["clip_id"] for r in conn.execute(
-                    "SELECT clip_id FROM posts WHERE platform = ? AND state = 'posted'",
+                    "SELECT clip_id FROM posts WHERE platform = ? "
+                    "AND state IN ('posted', 'drafted')",
                     (platform,),
                 ).fetchall()
             }
@@ -55,7 +56,7 @@ def handoff(cfg: Config, platform: str, *, clip_id: int | None = None) -> int:
                 return 0
             clip = candidates[0]
 
-        copy: PostCopy = publish._copy_for(clip, platform)
+        copy: PostCopy = publish._copy_for(clip, cfg, platform)
 
     video = Path(clip["render_path"] or "")
     print(f"\n  Post this to {platform}")
@@ -117,4 +118,84 @@ def record(
     print(f"  recorded clip {clip_id} as posted to {platform}")
     if metric is None:
         print(f"  add performance later:  shorts record {clip_id} {platform} --metric <n>")
+    return True
+
+
+def draft_to_tiktok(cfg: Config, *, clip_id: int | None = None) -> bool:
+    """
+    Uploads one clip to the account's TikTok drafts.
+
+    The only publishing path TikTok leaves open to us: the audit that would
+    allow direct posting was refused, and an unaudited app can only post
+    SELF_ONLY, which is not publishing. Here the API delivers the file and a
+    person posts it, which is precisely why it needs no audit.
+
+    The clip is recorded as 'drafted', not 'posted'. It is sitting in an app
+    waiting for someone to tap publish, and calling that a post would advance
+    the rotation on a video nobody has seen and feed the strategy notes a
+    history that did not happen.
+    """
+    from .publishers.tiktok import TikTokPublisher
+
+    publisher = TikTokPublisher()
+    ok, missing = publisher.available(cfg)
+    if not ok:
+        print(f"tiktok: {missing}")
+        return False
+
+    with db.connect(cfg.paths.database) as conn:
+        if clip_id is not None:
+            clip = conn.execute(
+                "SELECT * FROM clips WHERE id = ?", (clip_id,)
+            ).fetchone()
+            if clip is None:
+                print(f"clip {clip_id} not found")
+                return False
+        else:
+            taken = {
+                r["clip_id"] for r in conn.execute(
+                    "SELECT clip_id FROM posts WHERE platform = 'tiktok' "
+                    "AND state IN ('posted', 'drafted')"
+                ).fetchall()
+            }
+            candidates = [
+                c for c in db.clips_in_state(conn, "ready") if c["id"] not in taken
+            ]
+            if not candidates:
+                print("tiktok: nothing ready that has not already been sent")
+                return False
+            clip = candidates[0]
+
+        copy: PostCopy = publish._copy_for(clip, cfg, "tiktok")
+
+        video = Path(clip["render_path"] or "")
+        if not video.exists():
+            print(f"clip {clip['id']}: {video} not found")
+            return False
+
+        print(f"  uploading clip {clip['id']} to TikTok drafts...")
+        try:
+            result = publisher.publish(cfg, video, copy)
+        except Exception as exc:
+            print(f"  !! tiktok clip {clip['id']}: {exc}")
+            return False
+
+        conn.execute(
+            """
+            INSERT INTO posts (clip_id, platform, state, variant, remote_id,
+                               created_at)
+            VALUES (?, 'tiktok', 'drafted', 'hashtags:manual', ?, ?)
+            ON CONFLICT (clip_id, platform) DO UPDATE SET
+                state = 'drafted', remote_id = excluded.remote_id
+            """,
+            (clip["id"], result.remote_id, db.now()),
+        )
+        conn.commit()
+
+    print("")
+    print("  In your TikTok drafts. Open the notification, then paste:")
+    print("")
+    print(f"  {copy.caption_with_tags}")
+    print("")
+    print(f"  Once posted:  shorts record {clip['id']} tiktok --url <permalink>")
     return True

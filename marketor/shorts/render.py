@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +54,11 @@ def crop_x(
     return int(round(max(0.0, min(float(slack), damped))))
 
 
+#: Longer than this between two telemetry samples is a dropout, not a
+#: sampling interval, and gets held rather than interpolated across.
+_MAX_INTERPOLATED_GAP = 0.6
+
+
 def track_keyframes(
     series: list[tuple[float, float]],
     *,
@@ -60,12 +66,14 @@ def track_keyframes(
     source_width: int,
     crop_width: int,
     damping: float,
-    deadzone: float = 0.35,
+    deadzone: float = 0.20,
     rate: float = 30.0,
     smooth_seconds: float = 1.5,
-    max_pan_px_per_s: float = 160.0,
+    max_pan_px_per_s: float = 400.0,
     follow_gain: float = 0.18,
     ease_seconds: float = 0.6,
+    safe_fraction: float = 0.86,
+    rescue_px_per_s: float = 700.0,
 ) -> list[tuple[float, int]]:
     """
     Turns raw player positions into a crop path that holds still and then glides.
@@ -92,14 +100,40 @@ def track_keyframes(
     steps = max(2, int(duration * rate) + 1)
     times = [i / rate for i in range(steps)]
 
-    # Nearest-sample resample. Interpolating across a gap would invent motion
-    # that never happened.
+    # Linear between samples, held across a real gap.
+    #
+    # The game reports the player about five times a second and the camera runs
+    # at sixty, so nearest-sample resampling holds each position for twelve
+    # frames. Interpolating is not inventing motion: the player is a
+    # continuously moving object, and a straight line between two real
+    # positions 200ms apart is closer to the truth than a staircase. A genuine
+    # telemetry dropout is different and is still held rather than bridged, so
+    # a gap leaves the camera where it was.
+    #
+    # This was tried as a fix for a visible shimmer and is not one — measured
+    # across five clips it moved the worst frame-to-frame velocity change from
+    # 3px to 2px, because the smoothing average was already absorbing the
+    # staircase. The shimmer was the zoom. Kept because it is the correct
+    # reconstruction, not because it solved anything.
     resampled: list[float] = []
     cursor = 0
     for t in times:
-        while cursor + 1 < len(series) and abs(series[cursor + 1][0] - t) <= abs(series[cursor][0] - t):
+        while cursor + 1 < len(series) and series[cursor + 1][0] <= t:
             cursor += 1
-        resampled.append(series[cursor][1])
+
+        current_t, current_x = series[cursor]
+        if cursor + 1 >= len(series):
+            resampled.append(current_x)
+            continue
+
+        next_t, next_x = series[cursor + 1]
+        span = next_t - current_t
+        if span <= 0 or span > _MAX_INTERPOLATED_GAP:
+            resampled.append(current_x)
+            continue
+
+        weight = min(1.0, max(0.0, (t - current_t) / span))
+        resampled.append(current_x + (next_x - current_x) * weight)
 
     half = max(1, int(smooth_seconds * rate / 2))
     smoothed: list[float] = []
@@ -141,10 +175,55 @@ def track_keyframes(
         window = path[lo:hi]
         eased.append(sum(window) / len(window))
 
+    # Containment. Everything above is a preference about how the camera should
+    # feel; this is the one thing that is not negotiable, because a clip where
+    # the player is off screen is not a clip.
+    #
+    # Measured on real footage: the player crosses the frame faster than the pan
+    # cap 40% of the time, with a 608px window in a 1920px source. No amount of
+    # tuning the follower fixes that — the follower is rate limited by design,
+    # and raising the limit far enough to keep up brings back the whip pan the
+    # limit exists to prevent.
+    #
+    # So the smoothed path is kept wherever it already contains the player, and
+    # pushed the minimum distance needed wherever it does not. The camera glides
+    # when it can and locks to the player when it must, which is what a human
+    # operator does with a fast subject.
+    #
+    # Checked against the raw position, not the smoothed one. Smoothing is a
+    # 1.5 second moving average, so at speed it trails the player by most of a
+    # second — containing the average keeps the average in frame while the
+    # player themself is already outside it. That mistake made this clamp
+    # worth 0.1 percentage points instead of the real fix.
+    # Rate limited, or containment trades one artefact for a worse one: an
+    # unbounded correction produced 725px single-frame jumps, which reads as the
+    # camera being yanked. This ceiling is far above the ordinary follower's, so
+    # it only engages when the player is genuinely escaping.
+    safe = safe_fraction * (crop_width / 2.0)
+    rescue_step = rescue_px_per_s / rate
+    contained: list[float] = []
+    previous: float | None = None
+
+    for vx, x in zip(resampled, eased):
+        player_px = vx * source_width
+        centre = x + crop_width / 2.0
+        if player_px < centre - safe:
+            x = player_px + safe - crop_width / 2.0
+        elif player_px > centre + safe:
+            x = player_px - safe - crop_width / 2.0
+
+        x = max(0.0, min(slack, x))
+        if previous is not None:
+            delta = x - previous
+            if abs(delta) > rescue_step:
+                x = previous + math.copysign(rescue_step, delta)
+        previous = x
+        contained.append(x)
+
     keyframes: list[tuple[float, int]] = []
     emitted: int | None = None
 
-    for t, x in zip(times, eased):
+    for t, x in zip(times, contained):
         rounded = int(round(x))
         # Emit on every change, however small. Batching small moves into larger
         # ones is exactly what produces a visible lurch.
@@ -171,6 +250,89 @@ def write_track_commands(keyframes: list[tuple[float, int]], path: Path) -> Path
     return path
 
 
+def native_crop_width(source_width: int, source_height: int, cfg: Config) -> int:
+    """Widest 9:16 window that fits in the source height."""
+    width = min(source_width, int(round(source_height * cfg.clip.width / cfg.clip.height)))
+    return width - width % 2
+
+
+def widened_crop_width(
+    series: list[tuple[float, float]], source_width: int, source_height: int, cfg: Config
+) -> int:
+    """
+    Crop width for this clip, widened when the player would not stay inside.
+
+    The 9:16 window is only 608px of a 1080p source, and on the busiest clips
+    the player sweeps 1344px of it. No camera path fits a 1344px range into a
+    608px window; the follower can only choose which end to lose them at.
+
+    Widening trades resolution for framing: the gameplay renders smaller inside
+    black bars, and the player stays visible. Applied per clip and only when the
+    measured range demands it, so calm clips keep the full-bleed look.
+    """
+    native = native_crop_width(source_width, source_height, cfg)
+    if not cfg.clip.widen_when_needed or not series:
+        return native
+
+    inside = [x for _, x in series if 0.0 <= x <= 1.0]
+    if len(inside) < 4:
+        return native
+
+    # Ignore the extreme few percent: a single respawn should not letterbox a
+    # whole clip that is otherwise well framed.
+    inside.sort()
+    lo = inside[int(len(inside) * 0.02)]
+    hi = inside[int(len(inside) * 0.98)]
+    span = (hi - lo) * source_width
+
+    # The follower still contributes; it only has to cover what the window
+    # cannot. Anything up to this much travel stays comfortable.
+    needed = span * cfg.clip.widen_coverage
+    if needed <= native:
+        return native
+
+    ceiling = min(source_width, int(source_width * cfg.clip.widen_max_fraction))
+    width = min(ceiling, int(round(needed)))
+    return max(native, width - width % 2)
+
+
+def zoom_expression(cfg: Config, duration: float, trigger_at: float | None) -> str | None:
+    """
+    A time-varying zoom factor, as an ffmpeg expression.
+
+    Two effects share one filter because they are the same operation:
+
+    - A slow push in over the whole clip. A shot that creeps closer reads as
+      going somewhere; a static one reads as a recording. The move is a few
+      percent, well under the threshold where anyone notices it consciously.
+    - A tighter punch on the triggering moment. The telemetry knows exactly
+      when the missile passes or the diamond is lost, so the camera can lean in
+      just before and release after — reactive editing that no generic tool can
+      do, because no generic tool knows what happened.
+
+    Returns None when both are switched off, so the filter stays out of the
+    chain entirely rather than multiplying by one.
+    """
+    push = max(0.0, cfg.clip.zoom_push)
+    punch = max(0.0, cfg.clip.zoom_punch)
+    if push <= 0 and punch <= 0:
+        return None
+
+    terms = ["1"]
+    if push > 0 and duration > 0:
+        terms.append(f"{push:.4f}*min(it/{duration:.3f},1)")
+
+    if punch > 0 and trigger_at is not None:
+        # Gaussian, so the lean in and the release are both smooth and the peak
+        # lands on the event rather than around it.
+        width = max(0.2, cfg.clip.zoom_punch_seconds)
+        terms.append(
+            rf"{punch:.4f}*exp(-pow((it-{trigger_at:.3f})/{width:.3f}\,2))"
+        )
+
+    return "+".join(terms)
+
+
 def build_filter(
     cfg: Config,
     *,
@@ -181,22 +343,61 @@ def build_filter(
     track_path: Path | None = None,
     initial_x: int | None = None,
     letterbox: list[tuple[float, float]] | None = None,
+    crop_width: int | None = None,
+    zoom_expr: str | None = None,
 ) -> str:
     """Assembles the -filter_complex chain, ending in a [v] output label."""
     out_w, out_h = cfg.clip.width, cfg.clip.height
     parts: list[str] = []
     last = "v0"
 
+    # Dropping the dead frames has to be the first thing that happens, so every
+    # filter downstream — sendcmd, the zoom, the subtitles — sees the shortened
+    # timeline and needs no adjustment of its own. setpts closes the gaps that
+    # select leaves behind.
+    # Rate conversion happens once, here, for every path. It used to sit inside
+    # the zoom stage, which meant a clip that skipped the zoom — every widened
+    # clip — reached the output at source rate and was thinned by -r instead.
+    # Two different conversions on two kinds of clip is two kinds of judder.
+    parts.append(f"[0:v]fps={cfg.clip.fps}[vin]")
+    base = "[vin]"
+
     if cfg.clip.reframe == "crop":
-        # Widest 9:16 window that fits in the source height.
-        crop_w = min(source_width, int(round(source_height * out_w / out_h)))
-        crop_w -= crop_w % 2
+        crop_w = crop_width or native_crop_width(source_width, source_height, cfg)
+
+        # A window wider than 9:16 cannot fill the frame, so it is fitted and
+        # padded instead of stretched. That is the whole trade: the gameplay
+        # gets smaller, and the player stops leaving the shot.
+        widened = crop_w > native_crop_width(source_width, source_height, cfg)
+        # Fitted inside the box rather than scaled to its width. Scaling to
+        # width alone assumes the output is taller than what it receives,
+        # which holds for every vertical cut and for none of the 4:3 ones —
+        # there the scaled frame overflows and pad refuses to shrink it.
+        fit = (
+            f"scale={out_w}:{out_h}:force_original_aspect_ratio=decrease"
+            f":force_divisible_by=2:flags=lanczos,"
+            f"pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1"
+            if widened else
+            f"scale={out_w}:{out_h}:flags=lanczos,setsar=1"
+        )
 
         # The crop reads the whole frame, so it has to come off a split rather
         # than straight from the input when a letterboxed copy is also wanted.
-        source = "[main]" if letterbox else "[0:v]"
+        source = "[main]" if letterbox else base
         if letterbox:
-            parts.append("[0:v]split=2[main][whole]")
+            parts.append(f"{base}split=2[main][whole]")
+
+        # A widened crop exists because the action already does not fit. Zooming
+        # back in would spend exactly what the widening bought, so those clips
+        # keep their static framing.
+        if widened:
+            zoom_expr = None
+
+        # crop cannot carry the zoom: it evaluates w and h once at configuration
+        # time and only re-evaluates x and y per frame. zoompan is the filter
+        # that takes a time-varying scale factor, and it sits after the fit so
+        # the tracking crop still decides where to look.
+        stage = "vz" if zoom_expr else "v0"
 
         if track_path is not None:
             # sendcmd drives crop's x over time; it must sit ahead of crop in
@@ -204,14 +405,22 @@ def build_filter(
             x = initial_x if initial_x is not None else 0
             parts.append(
                 f"{source}sendcmd=f='{_escape_filter_path(track_path)}',"
-                f"crop={crop_w}:{source_height}:{x}:0,"
-                f"scale={out_w}:{out_h}:flags=lanczos,setsar=1[v0]"
+                f"crop={crop_w}:{source_height}:{x}:0,{fit}[{stage}]"
             )
         else:
             x = crop_x(source_width, crop_w, viewport_x, cfg.clip.track_damping)
             parts.append(
-                f"{source}crop={crop_w}:{source_height}:{x}:0,"
-                f"scale={out_w}:{out_h}:flags=lanczos,setsar=1[v0]"
+                f"{source}crop={crop_w}:{source_height}:{x}:0,{fit}[{stage}]"
+            )
+
+        if zoom_expr:
+            # zoompan restamps its output at its own fps, so it has to be told
+            # the rate the chain is already running at — set it wrong and the
+            # clip stretches and plays in slow motion.
+            parts.append(
+                f"[{stage}]zoompan=z='{zoom_expr}':d=1"
+                ":x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+                f":s={out_w}x{out_h}:fps={cfg.clip.fps}[v0]"
             )
 
         if letterbox:
@@ -231,8 +440,9 @@ def build_filter(
             wide -= wide % 2
             parts.append(
                 f"[whole]crop={wide}:{source_height}:(iw-{wide})/2:0,"
-                f"scale={out_w}:-2:flags=lanczos,"
-                f"pad={out_w}:{out_h}:0:(oh-ih)/2:color=black,setsar=1[vwhole]"
+                f"scale={out_w}:{out_h}:force_original_aspect_ratio=decrease"
+                f":force_divisible_by=2:flags=lanczos,"
+                f"pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[vwhole]"
             )
             windows = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b in letterbox)
             parts.append(f"[v0][vwhole]overlay=0:0:enable='{windows}'[vc]")
@@ -240,13 +450,23 @@ def build_filter(
     else:
         # Whole frame over a blurred, zoomed copy of itself. Loses nothing, but
         # the gameplay ends up small, so it is the fallback rather than default.
-        parts.append("[0:v]split=2[bg][fg]")
+        parts.append(f"{base}split=2[bg][fg]")
         parts.append(
             f"[bg]scale={out_w}:{out_h}:force_original_aspect_ratio=increase,"
             f"crop={out_w}:{out_h},gblur=sigma=28[bgb]"
         )
         parts.append(f"[fg]scale={out_w}:-2:flags=lanczos[fgs]")
         parts.append("[bgb][fgs]overlay=(W-w)/2:(H-h)/2,setsar=1[v0]")
+
+    # Hold the final frame. A hard cut to black ends the clip; a held frame
+    # ends the thought — and on a looping platform it is the moment the last
+    # caption is actually read, which is what makes a replay happen.
+    if cfg.clip.freeze_end > 0:
+        parts.append(
+            f"[{last}]tpad=stop_mode=clone:"
+            f"stop_duration={cfg.clip.freeze_end:.2f}[vf]"
+        )
+        last = "vf"
 
     if subtitle_path is not None:
         parts.append(f"[{last}]subtitles='{_escape_filter_path(subtitle_path)}'[v]")
@@ -269,13 +489,25 @@ def render_clip(
     beats: list[dict] | None = None,
     source_info: ffmpeg.MediaInfo | None = None,
     menu_windows: list[tuple[float, float]] | None = None,
+    trigger_at: float | None = None,
+    captions_on: bool = True,
 ) -> Path:
     info = source_info or ffmpeg.probe(source_path, ffprobe=cfg.ffprobe)
     duration = end - start
+    # `duration` shrinks below if dead air is cut; the input window does not.
+    source_duration = duration
 
-    letterbox = _clip_windows(menu_windows, start, duration, cfg.render.letterbox_pad)
+    letterbox = _clip_windows(
+        menu_windows, start, duration, cfg.render.letterbox_pad,
+        lead=cfg.render.letterbox_lead,
+        trail=cfg.render.letterbox_trail,
+    )
 
     subtitle_path = None
+    # Burned-in text is a feed device: it exists because a muted clip
+    # autoplays past a thumb. A clip someone chose to open does not need to
+    # be told what it is, and the text sits on top of the gameplay that is
+    # the whole reason they opened it.
     # Timed beats when the writer produced them; a single hook otherwise.
     cues = (
         captions.beat_cues(
@@ -289,23 +521,39 @@ def render_clip(
     )
     if not cues:
         cues = captions.hook_cues(hook, duration)
+    if not captions_on:
+        cues = []
     if cues:
+        # Carry the closing line across the held frame. Holding a frame with no
+        # caption on it is just a longer clip; holding it under the last line is
+        # what gives that line time to land.
+        if cfg.clip.freeze_end > 0:
+            cues[-1].end += cfg.clip.freeze_end
+
         subtitle_path = out_path.with_suffix(".ass")
         captions.write(cfg, cues, subtitle_path)
 
     # A static crop is right on average and wrong at the extremes: during a long
     # traversal the player ends up pinned to the frame edge. With enough samples
     # the window follows instead.
+    #
+    # Holding one window for the whole clip was tried and rejected. It works on
+    # paper — 47 clips of 57 keep the player framed with no camera at all, and
+    # the rest do once the window is widened — and it removes the last of the
+    # shimmer, 0 direction reversals against 2. But the widening it needs costs
+    # letterbox on the clips that move most, and watched side by side the slight
+    # movement is the better picture. Kept as a note rather than a setting: the
+    # answer here came from looking, not from the numbers.
     track_path = None
     initial_x = None
+    crop_w = None
     if (
         cfg.clip.reframe == "crop"
         and cfg.clip.tracking
         and viewport_series
         and len(viewport_series) >= 4
     ):
-        crop_w = min(info.width, int(round(info.height * cfg.clip.width / cfg.clip.height)))
-        crop_w -= crop_w % 2
+        crop_w = widened_crop_width(viewport_series, info.width, info.height, cfg)
         keyframes = track_keyframes(
             viewport_series,
             duration=duration,
@@ -317,6 +565,8 @@ def render_clip(
             # One keyframe per output frame, so a pan is motion rather than a
             # sequence of held frames punctuated by jumps.
             rate=float(cfg.clip.fps),
+            safe_fraction=cfg.clip.track_safe_fraction,
+            rescue_px_per_s=cfg.clip.track_rescue_px_per_s,
         )
         if keyframes:
             initial_x = keyframes[0][1]
@@ -331,6 +581,8 @@ def render_clip(
         track_path=track_path,
         initial_x=initial_x,
         letterbox=letterbox,
+        crop_width=crop_w if track_path is not None else None,
+        zoom_expr=zoom_expression(cfg, duration, trigger_at),
     )
 
     args = [
@@ -338,8 +590,12 @@ def render_clip(
         # Seek before -i so ffmpeg skips to the region instead of decoding from
         # the start of what may be a 40 minute file.
         "-ss", f"{start:.3f}",
+        # Bound the input, not just the output: tpad only pads at end of
+        # stream, so the source has to actually run out for the held frame to
+        # exist. The output limit then has to leave room for it.
+        "-t", f"{source_duration:.3f}",
         "-i", str(source_path),
-        "-t", f"{duration:.3f}",
+        "-t", f"{duration + cfg.clip.freeze_end:.3f}",
         "-filter_complex", filter_complex,
         "-map", "[v]",
     ]
@@ -378,6 +634,8 @@ def _clip_windows(
     start: float,
     duration: float,
     pad: float,
+    lead: float = 0.0,
+    trail: float = 0.0,
 ) -> list[tuple[float, float]]:
     """
     Converts video-time windows to clip-relative, keeping only what overlaps.
@@ -388,8 +646,18 @@ def _clip_windows(
     """
     result: list[tuple[float, float]] = []
     for begin, finish in windows or []:
-        a = max(0.0, begin - start - pad)
-        b = min(duration, finish - start + pad)
+        # The lead is one-sided. Measured against the picture, the overlay was
+        # landing a tenth of a second after the menu appeared, which reads as
+        # late because the eye catches the menu first; arriving a hair early
+        # does not read as anything. Padding the tail instead would bring back
+        # the fault this replaced, the letterbox sitting over live gameplay.
+        # Lead and trail are separate because the menu is not symmetric. It
+        # appears in a single frame, so a tenth of a second of lead is enough;
+        # it leaves over an animation that runs 0.4s past the picture
+        # unfreezing, and cutting there dropped the letterbox while the cards
+        # were still on screen.
+        a = max(0.0, begin - start - pad - lead)
+        b = min(duration, finish - start + pad + trail)
         if b - a > 0.05:
             result.append((a, b))
 
@@ -407,6 +675,18 @@ def _clip_windows(
 
 def _menu_windows_for_source(source: Any) -> list[tuple[float, float]]:
     """Video-time stretches where the game sat on a full-screen menu."""
+    # Measured from the picture when that was possible, which is more accurate
+    # than the event log at both edges — see ingest.measure_menu_windows.
+    try:
+        stored = source["menu_windows"]
+    except (IndexError, KeyError):
+        stored = None
+    if stored:
+        try:
+            return [(float(a), float(b)) for a, b in json.loads(stored)]
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+
     if not source["telemetry_path"] or source["offset_seconds"] is None:
         return []
 
@@ -467,6 +747,14 @@ def render_pending(cfg: Config, *, limit: int | None = None, verbose: bool = Tru
             except (json.JSONDecodeError, TypeError):
                 beats = []
 
+            # Where the payoff sits, so the camera can lean into it.
+            try:
+                context = json.loads(clip["context"] or "{}")
+                trigger_at = context.get("trigger_at")
+                trigger_at = float(trigger_at) if trigger_at is not None else None
+            except (json.JSONDecodeError, TypeError, ValueError):
+                trigger_at = None
+
             try:
                 render_clip(
                     cfg,
@@ -479,6 +767,7 @@ def render_pending(cfg: Config, *, limit: int | None = None, verbose: bool = Tru
                     viewport_series=series,
                     beats=beats,
                     menu_windows=menus,
+                    trigger_at=trigger_at,
                 )
             except ffmpeg.FFmpegError as exc:
                 print(f"  !! clip {clip['id']} failed to render: {exc}")

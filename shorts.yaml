@@ -4,10 +4,14 @@ paths:
   work: Q:\Development\Marketor\shorts_work
   output: Q:\Development\Marketor\shorts_out
   database: Q:\Development\Marketor\shorts.db
+  archive: Q:\Development\Marketor\clips_processed
 clip:
+  # 4:5 plutot que 9:16. En 9:16 la fenetre ne fait que 608 px d'une source
+  # 1920 : le joueur sort du cadre et le decor n'est plus lisible. En 4:5 elle
+  # en fait 864, et le format reste vertical donc eligible partout.
   width: 1080
-  height: 1920
-  fps: 30
+  height: 1350
+  fps: 60
   min_duration: 14.0
   max_duration: 55.0
   lead_in: 13.0
@@ -20,12 +24,47 @@ clip:
   reframe: crop
   track_damping: 0.85
   tracking: true
-  track_deadzone: 0.35
-  track_smoothing: 1.5
+  track_deadzone: 0.60
+  track_smoothing: 2.0
+  track_safe_fraction: 0.86
+  track_rescue_px_per_s: 700.0
+  widen_when_needed: true
+  widen_coverage: 0.8
+  widen_max_fraction: 0.72
+  # Marges autour d'un changement de scene. Le level_start arrive quand la
+  # scene est chargee, mais l'image a deja commence a changer avant.
+  # Un clip couvre une seule tentative : il finit sur la mort ou la victoire,
+  # et ne commence pas dans le fondu de reapparition de la precedente.
+  death_tail: 0.40
+  victory_tail: 1.6
+  respawn_margin: 5.2
+  level_end_margin: 2.5
+  level_start_margin: 1.5
+  # Montage: zoom lent, coup de zoom sur l'evenement, arret sur image final.
+  zoom_push: 0.0
+  zoom_punch: 0.05
+  zoom_punch_seconds: 1.1
+  freeze_end: 0.6
 selection:
-  max_clips_per_video: 6
+  # Budget proportionnel a la duree, borne par les deux suivants.
+  minutes_per_clip: 1.5
+  min_clips_per_video: 3
+  max_clips_per_video: 14
+  cap_scale_minutes: 10.0
   min_gap_between_clips: 25.0
+  same_spot_radius: 100.0
+  wall_burst_bonus: 0.10
+  idle_speed: 1.0
+  max_idle_fraction: 0.60
+  near_miss_damage_guard: 2.0
+  near_miss_min_distance: 0.15
+  hazard_bonus: 0.06
+  rate_window: 20.0
+  near_miss_bonus: 0.05
   max_per_event:
+    bonus_near_miss: 2
+    wallrun: 2
+    burst: 2
     wall_near_miss: 2
     speed_peak: 2
     input_flurry: 2
@@ -35,18 +74,21 @@ selection:
     checkpoint: 1
   weights:
     bonus_lost: 11.0
+    waveburst: 10.5
     jelly_combo: 10.0
     ghost_lead_change: 9.8
     projectile_near_miss: 9.5
     victory: 9.0
     bonus_secured: 8.5
+    bonus_near_miss: 8.0
     worm_near: 8.0
     wall_near_miss: 7.0
     speed_peak: 7.0
-    wallrun: 6.0
+    wallrun: 7.0
     death: 5.5
     input_flurry: 5.5
     bonus_pickup: 5.0
+    burst: 7.0
     grapple_attach: 3.0
     powerup_pickup: 2.5
     shield_hit: 2.0
@@ -62,16 +104,7 @@ copy:
   structured_outputs: auto
   brand: This is no cave
   team: monome.studio
-  pronoun: we
-  project_status: The game was released in October 2025 and is finished. It is not
-    in active development and there is no roadmap. Talk about making it in the past
-    tense.
   prompts_file: Q:\Development\Marketor\prompts.md
-  style: devlog
-  tone: Dry, confident, a little self-deprecating. Sounds like someone who has died
-    to this exact trap 200 times and designed it themselves. Never uses hype words
-    like 'insane', 'epic' or 'you won't believe'.
-  dev_notes: []
   hashtags:
     tiktok:
     - '#indiegame'
@@ -111,10 +144,17 @@ publish:
   - youtube
   - tiktok
   - instagram
+  # Promotion en cours : 1 post par jour et par plateforme, a une heure tiree
+  # au hasard entre 16h et 22h. S'eteint tout seul apres la date.
+  promo:
+    until: '2026-09-06'
+    per_day: 1
+    from_hour: 16
+    to_hour: 22
   cadence_days:
-    youtube: 2.0
-    tiktok: 2.0
-    instagram: 2.0
+    youtube: 1.75
+    tiktok: 1.75
+    instagram: 1.75
   max_posts_per_platform_per_day: 2
   youtube_client_secrets: Q:\Development\Marketor\credentials.json
   youtube_token: Q:\Development\Marketor\youtube_token.json
@@ -122,7 +162,7 @@ publish:
   youtube_privacy: public
   tiktok_token: Q:\Development\Marketor\tiktok_token.json
   tiktok_privacy: PUBLIC_TO_EVERYONE
-  instagram_user_id: '28191667613827029'
+  instagram_user_id: '17841453548045333'
   hosting:
     backend: github_release
     github_repo: DimitriKouliche/Marketor
@@ -144,12 +184,11 @@ experiments:
       broad:
       - '#indiegame'
       - '#gamedev'
-      - '#indiedev'
       - '#platformer'
       niche:
+      - '#indiedev'
       - '#pixelart'
-      - '#gamedevdiary'
-      - '#indiegamedev'
+      - '#screenshotsaturday'
     youtube:
       broad:
       - '#shorts'

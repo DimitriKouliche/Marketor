@@ -1,13 +1,22 @@
 """
-TikTok via the Content Posting API (direct post).
+TikTok via the Content Posting API, in one of two modes.
 
-Two things to know before this will post publicly:
+`direct` posts straight to the profile, and needs an audited app. Ours was
+refused: TikTok told us in as many words that "TikTok for Developers currently
+does not support personal or internal company use", which is exactly what
+posting our own game to our own account is. That is a policy, not a form we
+filled in wrong, so reapplying with the same premise gets the same answer. An
+unaudited app can still call the endpoint, but every post is forced to
+SELF_ONLY — visible to nobody, which is not publishing.
 
-1. Your app must pass TikTok's audit. Until it does, every post is forced to
-   SELF_ONLY (visible only to you) regardless of what you send. The audit takes
-   a few weeks and checks your integration's UX against their guidelines.
-2. The creator's own privacy options are authoritative. The API tells you what
-   is allowed via creator_info; sending something outside that list is rejected.
+`inbox` is the mode that works, and the default. The video is uploaded to the
+account's TikTok drafts, where the creator opens the notification, writes the
+caption and posts. The API never publishes, a person does, which is the whole
+reason TikTok allows it without an audit.
+
+The cost is the caption: the inbox endpoint accepts source_info and nothing
+else, so the copy this pipeline writes cannot travel with the video. It has to
+be carried over by hand, which is why `handoff` prints it.
 
 Credentials come from the environment (TIKTOK_CLIENT_KEY, TIKTOK_CLIENT_SECRET)
 and a token file holding the OAuth grant.
@@ -72,7 +81,22 @@ class TikTokPublisher:
         if response.status_code != 200:
             raise PublishError(f"TikTok token refresh failed: {response.text}")
 
+        # TikTok answers 200 with the failure in the body, so the status check
+        # above never fires and payload["access_token"] used to die on a bare
+        # KeyError reading '"access_token"' — which says nothing about what
+        # went wrong or what to do about it.
         payload = response.json()
+        if "access_token" not in payload:
+            detail = payload.get("error_description") or payload.get("error") or payload
+            hint = ""
+            if payload.get("error") == "invalid_grant":
+                hint = (
+                    " — the saved grant no longer works; run "
+                    "`shorts tiktok-auth` to authorise again. Note a grant "
+                    "belongs to the app that issued it, so swapping the "
+                    "sandbox keys for production ones invalidates it too."
+                )
+            raise PublishError(f"TikTok token refresh failed: {detail}{hint}")
         data.update(
             access_token=payload["access_token"],
             refresh_token=payload.get("refresh_token", data["refresh_token"]),
@@ -105,6 +129,9 @@ class TikTokPublisher:
             raise PublishError(f"{video} not found")
 
         token = self._token(cfg)
+        if getattr(cfg.publish, "tiktok_mode", "inbox") == "inbox":
+            return self._to_inbox(token, video)
+
         info = self._creator_info(token)
 
         allowed = info.get("privacy_level_options") or ["SELF_ONLY"]
@@ -115,11 +142,7 @@ class TikTokPublisher:
             privacy = "SELF_ONLY" if "SELF_ONLY" in allowed else allowed[0]
 
         size = video.stat().st_size
-        if size <= SINGLE_CHUNK_LIMIT:
-            chunk_size, chunk_count = size, 1
-        else:
-            chunk_size = CHUNK_SIZE
-            chunk_count = math.ceil(size / chunk_size)
+        chunk_size, chunk_count = self._chunking(size)
 
         init = requests.post(
             f"{API}/post/publish/video/init/",
@@ -160,6 +183,53 @@ class TikTokPublisher:
             platform=self.name,
             remote_id=publish_id,
             url=None,  # TikTok does not return a post URL from this endpoint.
+        )
+
+    def _chunking(self, size: int) -> tuple[int, int]:
+        if size <= SINGLE_CHUNK_LIMIT:
+            return size, 1
+        return CHUNK_SIZE, math.ceil(size / CHUNK_SIZE)
+
+    def _to_inbox(self, token: str, video: Path) -> PublishResult:
+        """
+        Uploads to the account's drafts. No caption: the endpoint takes
+        source_info only, and the creator writes the text in the app.
+        """
+        size = video.stat().st_size
+        chunk_size, chunk_count = self._chunking(size)
+
+        init = requests.post(
+            f"{API}/post/publish/inbox/video/init/",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json; charset=UTF-8",
+            },
+            json={
+                "source_info": {
+                    "source": "FILE_UPLOAD",
+                    "video_size": size,
+                    "chunk_size": chunk_size,
+                    "total_chunk_count": chunk_count,
+                },
+            },
+            timeout=60,
+        )
+        if init.status_code != 200:
+            raise PublishError(f"TikTok inbox init failed: {init.text}")
+
+        payload = init.json().get("data", {})
+        publish_id = payload.get("publish_id")
+        upload_url = payload.get("upload_url")
+        if not publish_id or not upload_url:
+            raise PublishError(f"TikTok inbox returned no upload target: {init.text}")
+
+        self._upload(video, upload_url, size, chunk_size, chunk_count)
+        self._await_publish(token, publish_id)
+
+        return PublishResult(
+            platform=self.name,
+            remote_id=publish_id,
+            url=None,  # A draft has no URL until the creator posts it.
         )
 
     def _upload(self, video: Path, url: str, size: int, chunk_size: int, count: int) -> None:
