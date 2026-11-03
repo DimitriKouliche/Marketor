@@ -96,6 +96,13 @@ MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         # about posts made today has nothing left to join against. A post is
         # the only row that is never rewritten.
         ("dimensions", "TEXT"),
+        # What this post actually said, snapshotted at publish time. The clip's
+        # copy is not durable: every clip goes to all three platforms in turn,
+        # and each turn rewrites hook, caption and title to that run's brief.
+        # The text a post went out with was therefore erased by the next
+        # platform's rewrite, which makes "did this wording work" a question
+        # the database could not answer about its own posts.
+        ("copy", "TEXT"),
     ],
     "clips": [
         # Timed on-screen caption beats, as JSON [{text, at}].

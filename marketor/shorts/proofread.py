@@ -242,7 +242,15 @@ NOT ERRORS — leave every one of these alone:
 - A missing period at the end of a line.
 - A lowercase first word, if that is how the line was written.
 - Starting a sentence with And, But or So.
-- Slang, gaming jargon, and deliberate understatement.
+- Slang and deliberate understatement. These are voice, not error.
+  Game jargon is the exception and you MUST remove it: a term whose meaning
+  comes from having played this game means nothing to the person the post is
+  trying to reach. "5-chain bounce", "waveburst", "wallrun", "gas burst",
+  "jelly combo", a count of a mechanic nobody outside the game can name — all
+  of these are jargon, and a title built on one is a title nobody can read.
+  Replace with what a viewer would see happening. This rule beats every
+  instruction above about leaving wording alone: it went out in a real title
+  once, on a video that reached four people.
 - Second person, and addressing the viewer directly.
 - Numerals instead of spelled-out numbers.
 - Colloquial pronoun case in a compound subject: "me and the walls have

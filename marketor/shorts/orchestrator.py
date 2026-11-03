@@ -297,6 +297,31 @@ def gather(
             })
         state["recent_posts"] = history
 
+        # Attempts that did not publish, with the reason. Without these the
+        # planner sees a clip it remembers assigning, no post to show for it,
+        # and no way to tell "already published, do not repeat" from "failed,
+        # safe to retry". It picked the cautious reading and held the slot --
+        # every hour, for a day, waiting on a reconciliation that was never
+        # going to come, while the fix was simply to try again.
+        failures = conn.execute(
+            """
+            SELECT clip_id, platform, error, created_at
+              FROM posts
+             WHERE state = 'failed'
+             ORDER BY created_at DESC LIMIT 20
+            """
+        ).fetchall()
+        state["failed_attempts"] = [
+            {
+                "clip_id": row["clip_id"],
+                "platform": row["platform"],
+                "when": row["created_at"],
+                "why": (row["error"] or "")[:200],
+                "safe_to_retry": True,
+            }
+            for row in failures
+        ]
+
     # Aggregated performance, reusing the learning report's own bucketing so the
     # planner and `shorts learn` never disagree about what the data says.
     data = learn._collect(cfg)
@@ -341,6 +366,14 @@ def _system_prompt(cfg: Config) -> str:
         "- `clip_id` must come from available_clips.\n"
         "- Never post a clip to a platform listed in its `posted_to`.\n"
         "- Never send the same clip to two platforms in the same run.\n\n"
+        "YOU CANNOT CAUSE A DUPLICATE. One post per clip per platform is a "
+        "uniqueness constraint in the database, and a clip already posted to a "
+        "platform is removed from that platform's candidates before you see "
+        "it. So never hold a slot open out of doubt about whether something "
+        "published: the doubt is unfounded, and a held slot is simply a post "
+        "that never happened. `failed_attempts` lists tries that did not "
+        "publish and why; every one of them is safe to send again, and a clip "
+        "there is not evidence that something went out.\n\n"
         "ROTATION. Every clip is meant to reach every platform "
         "eventually, one platform at a time. The catalogue is finite, and "
         "a clip already posted somewhere is not used up — it is part-way "

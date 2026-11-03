@@ -142,7 +142,6 @@ render:
 publish:
   platforms:
   - youtube
-  - tiktok
   - instagram
   # Promotion en cours : 1 post par jour et par plateforme, a une heure tiree
   # au hasard entre 16h et 22h. S'eteint tout seul apres la date.
@@ -221,8 +220,7 @@ orchestrator:
   model: gpt-5.6-terra
   autopost: true
   proofread: true
-  manual_platforms:
-  - tiktok
+  manual_platforms: []
   memory_file: Q:\Development\Marketor\strategy.md
   history_limit: 40
   allow_weight_changes: true

@@ -277,6 +277,16 @@ def due(conn, cfg: Config, platform: str) -> tuple[bool, str]:
     return False, f"next post in {hours:.0f}h (every {days:g} day(s))"
 
 
+def _copy_snapshot(copy: PostCopy) -> dict[str, Any]:
+    """The words that went out, as they went out."""
+    return {
+        "title": copy.title,
+        "caption": copy.caption,
+        "hashtags": list(copy.hashtags),
+        "posted_text": copy.caption_with_tags,
+    }
+
+
 def _posted_today(conn, platform: str) -> int:
     since = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
     row = conn.execute(
@@ -399,11 +409,12 @@ def publish_one(
             """
             UPDATE posts SET state = 'posted', remote_id = ?, url = ?,
                              error = NULL, posted_at = ?, dimensions = ?,
-                             catch_up = ?
+                             catch_up = ?, copy = ?
              WHERE clip_id = ? AND platform = ?
             """,
             (result.remote_id, result.url, db.now(),
              json.dumps(dimensions_of(clip)), 1 if catch_up else 0,
+             json.dumps(_copy_snapshot(copy)),
              clip_id, platform),
         )
         conn.commit()
@@ -505,11 +516,14 @@ def publish_ready(cfg: Config, *, dry_run: bool = False, verbose: bool = True) -
                     """
                     UPDATE posts
                        SET state = 'posted', remote_id = ?, url = ?,
-                           error = NULL, posted_at = ?, dimensions = ?
+                           error = NULL, posted_at = ?, dimensions = ?,
+                           copy = ?
                      WHERE clip_id = ? AND platform = ?
                     """,
                     (result.remote_id, result.url, db.now(),
-                     json.dumps(dimensions_of(clip)), clip["id"], platform),
+                     json.dumps(dimensions_of(clip)),
+                     json.dumps(_copy_snapshot(copy)),
+                     clip["id"], platform),
                 )
                 conn.commit()
 

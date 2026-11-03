@@ -22,10 +22,21 @@ from .base import PostCopy, PublishError, PublishResult
 # through videos.list, which refuses an upload-only token with "insufficient
 # authentication scopes". The metrics fetcher was written against this API and
 # had never once succeeded because of it.
-SCOPES = [
+#: Without these, this class cannot do its job. upload posts the video;
+#: readonly is what videos.list needs to read a video's own statistics back.
+REQUIRED_SCOPES = [
     "https://www.googleapis.com/auth/youtube.upload",
     "https://www.googleapis.com/auth/youtube.readonly",
 ]
+
+#: Nice to have, and strictly separate from the two above. yt-analytics is the
+#: only way to tell a video nobody was shown from a video everybody skipped.
+OPTIONAL_SCOPES = [
+    "https://www.googleapis.com/auth/yt-analytics.readonly",
+]
+
+#: What a fresh authorisation asks for.
+SCOPES = REQUIRED_SCOPES + OPTIONAL_SCOPES
 
 # YouTube truncates hard at these; better to trim than to be rejected.
 MAX_TITLE = 100
@@ -60,7 +71,23 @@ class YouTubePublisher:
             )
         return True, ""
 
-    def _credentials(self, cfg: Config):
+    def _credentials(self, cfg: Config, *, reauthorise: bool = False):
+        """
+        A usable token, refreshed against the scopes it was actually granted.
+
+        Refreshing against this module's SCOPES instead is what broke uploading
+        for six days: adding yt-analytics to the list meant every refresh asked
+        Google for a scope the saved grant did not carry, and Google answers
+        that with `invalid_scope` — which reads as a broken account rather than
+        as a stale token, and names no remedy. A grant knows its own scopes;
+        they are the only correct thing to refresh with.
+
+        So an optional scope can no longer take posting down with it. Adding one
+        now costs an un-upgraded token that still uploads, until someone runs
+        `shorts youtube-auth`.
+        """
+        import json
+
         from google.auth.transport.requests import Request
         from google.oauth2.credentials import Credentials
         from google_auth_oauthlib.flow import InstalledAppFlow
@@ -68,21 +95,42 @@ class YouTubePublisher:
         token_path = cfg.publish.youtube_token
         creds = None
 
-        if token_path.exists():
-            creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+        if token_path.exists() and not reauthorise:
+            try:
+                granted = json.loads(token_path.read_text(encoding="utf-8")).get("scopes")
+            except (json.JSONDecodeError, OSError):
+                granted = None
+            creds = Credentials.from_authorized_user_file(
+                str(token_path), granted or REQUIRED_SCOPES
+            )
 
-        if not creds or not creds.valid:
-            if creds and creds.expired and creds.refresh_token:
+        if creds and creds.valid:
+            return creds
+
+        if creds and creds.expired and creds.refresh_token:
+            try:
                 creds.refresh(Request())
-            else:
-                flow = InstalledAppFlow.from_client_secrets_file(
-                    str(cfg.publish.youtube_client_secrets), SCOPES
-                )
-                # Opens a browser once; the refresh token is reused after that.
-                creds = flow.run_local_server(port=0)
+                token_path.write_text(creds.to_json(), encoding="utf-8")
+                return creds
+            except Exception as exc:
+                # A grant that cannot be refreshed is a grant that is gone;
+                # say so rather than opening a browser in a scheduled run that
+                # nobody is watching.
+                raise PublishError(
+                    f"YouTube authorisation expired and could not be refreshed "
+                    f"({exc}). Run `shorts youtube-auth` to sign in again."
+                ) from exc
 
-            token_path.write_text(creds.to_json(), encoding="utf-8")
+        if not reauthorise and token_path.exists():
+            raise PublishError(
+                "YouTube token is unusable. Run `shorts youtube-auth`."
+            )
 
+        flow = InstalledAppFlow.from_client_secrets_file(
+            str(cfg.publish.youtube_client_secrets), SCOPES
+        )
+        creds = flow.run_local_server(port=0)
+        token_path.write_text(creds.to_json(), encoding="utf-8")
         return creds
 
     def publish(self, cfg: Config, video: Path, copy: PostCopy) -> PublishResult:

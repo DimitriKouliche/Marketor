@@ -152,8 +152,11 @@ a Meta app with Advanced Access to `instagram_content_publish`. Use Graph API
 Explorer to get a long-lived Page token → `IG_ACCESS_TOKEN`, and put the numeric
 account id in `publish.instagram_user_id`.
 
-Long-lived Page tokens expire about every 60 days. Instagram will silently stop
-posting when that happens, and it will look like a pipeline bug — set a reminder.
+Explorer gives a token that lasts an hour. Paste it into `.env`, then run
+`shorts instagram-token`: it exchanges it for a long-lived user token and then
+for a Page token, which does not expire, and rewrites `.env`. The Page step
+needs `pages_show_list` and `pages_read_engagement` on the Explorer token;
+without them you get the 60-day user token instead.
 
 Instagram fetches the video from a URL instead of accepting an upload, so it
 needs somewhere public to fetch from. The default `github_release` backend

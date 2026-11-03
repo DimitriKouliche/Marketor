@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import date
 from typing import Any
 
 import requests
@@ -89,7 +90,51 @@ def _youtube(cfg: Config, remote_ids: list[str]) -> dict[str, dict[str, Any]]:
                 comments=int(stats.get("commentCount", 0)),
             )
 
+    _add_youtube_reach(cfg, out)
     return out
+
+
+def _add_youtube_reach(cfg: Config, out: dict[str, dict[str, Any]]) -> None:
+    """
+    Adds impressions and average view duration, where the grant allows it.
+
+    Views alone cannot tell a video nobody was shown from a video everybody
+    skipped, and those two failures have opposite fixes: the first is about
+    distribution, the second about the first second of the clip. Analytics is
+    a separate authorisation, so this stays optional and never fails the run.
+    """
+    if not out:
+        return
+    try:
+        from googleapiclient.discovery import build
+
+        from .publishers.youtube import YouTubePublisher
+
+        creds = YouTubePublisher()._credentials(cfg)
+        if not any("yt-analytics" in s for s in (getattr(creds, "scopes", None) or [])):
+            return
+
+        analytics = build("youtubeAnalytics", "v2", credentials=creds)
+        for video_id, row in out.items():
+            resp = analytics.reports().query(
+                ids="channel==MINE",
+                startDate="2020-01-01",
+                endDate=date.today().isoformat(),
+                metrics="views,estimatedMinutesWatched,averageViewDuration,"
+                        "averageViewPercentage",
+                filters=f"video=={video_id}",
+            ).execute()
+            rows = resp.get("rows") or []
+            if not rows:
+                continue
+            _, minutes, avg_seconds, avg_percent = rows[0][:4]
+            row["watch_seconds"] = avg_seconds
+            row["retention"] = avg_percent
+            # Retention is the honest quality signal: it does not move with
+            # how many people the platform chose to show the clip to.
+            row["quality"] = avg_percent
+    except Exception as exc:
+        print(f"  (youtube analytics unavailable: {exc})")
 
 
 def _instagram(cfg: Config, remote_ids: list[str]) -> dict[str, dict[str, Any]]:

@@ -75,17 +75,19 @@ def _instagram(cfg: Config) -> tuple[str, str]:
 def _youtube(cfg: Config) -> tuple[str, str]:
     if not cfg.publish.youtube_token.exists():
         return "warn", "pas encore autorise (le prochain post ouvre un navigateur)"
+    # The publisher's own refresh path, not a copy of it: the copy refreshed
+    # against SCOPES and failed with invalid_scope on a grant that uploads fine.
     try:
-        from google.auth.transport.requests import Request
-        from google.oauth2.credentials import Credentials
-        from .publishers.youtube import SCOPES
+        from .publishers.youtube import OPTIONAL_SCOPES, YouTubePublisher
 
-        creds = Credentials.from_authorized_user_file(str(cfg.publish.youtube_token), SCOPES)
-        if creds.expired and creds.refresh_token:
-            creds.refresh(Request())  # exercises the refresh path, no upload
-        return ("ok", "jeton valide") if creds.valid else ("fail", "jeton invalide")
+        creds = YouTubePublisher()._credentials(cfg)  # refresh only, no upload
     except Exception as exc:
         return "fail", str(exc)[:110]
+    if not creds.valid:
+        return "fail", "jeton invalide"
+    if not set(OPTIONAL_SCOPES) <= set(creds.scopes or []):
+        return "ok", "jeton valide (sans yt-analytics : 'shorts youtube-auth' pour l'ajouter)"
+    return "ok", "jeton valide"
 
 
 def _tiktok(cfg: Config) -> tuple[str, str]:

@@ -26,7 +26,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import copywriter, db, env, health, ingest, learn, manual, metrics, orchestrator
-from . import tiktok_auth
+from . import ig_auth, tiktok_auth
 from . import prompts, publish, qc
 from . import config as config_module
 from . import render, select, telemetry
@@ -846,6 +846,45 @@ def cmd_record(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def cmd_youtube_auth(args: argparse.Namespace) -> int:
+    """
+    Re-runs YouTube's consent screen.
+
+    Needed whenever the scope list grows: a saved token carries the grants it
+    was issued with, and nothing re-asks on its own — the call simply fails
+    with a permissions error that names no remedy.
+    """
+    cfg = _cfg(args)
+    from .publishers.youtube import SCOPES, YouTubePublisher
+
+    token = cfg.publish.youtube_token
+    print("YouTube authorisation")
+    print("  a browser window will open — sign in as the channel owner")
+    print("  requesting:")
+    for scope in SCOPES:
+        print(f"    {scope.rsplit('/', 1)[-1]}")
+
+    if token.exists():
+        token.unlink()
+
+    creds = YouTubePublisher()._credentials(cfg, reauthorise=True)
+    granted = list(getattr(creds, "scopes", None) or [])
+    print("")
+    print("  granted:")
+    for scope in granted:
+        print(f"    {scope.rsplit('/', 1)[-1]}")
+    if not any("yt-analytics" in scope for scope in granted):
+        print("  !! analytics was not granted; retention stays unavailable")
+        return 1
+    return 0
+
+
+def cmd_instagram_token(args: argparse.Namespace) -> int:
+    cfg = _cfg(args)
+    print("Instagram token")
+    return 0 if ig_auth.make_permanent(cfg) else 1
+
+
 def cmd_tiktok_auth(args: argparse.Namespace) -> int:
     cfg = _cfg(args)
     print("TikTok authorisation")
@@ -994,6 +1033,10 @@ def build_parser() -> argparse.ArgumentParser:
                      help="plan only; change nothing, not even the notes")
     orc.set_defaults(func=cmd_orchestrate)
 
+    yta = sub.add_parser("youtube-auth",
+                         help="re-authorise YouTube (needed after a scope change)")
+    yta.set_defaults(func=cmd_youtube_auth)
+
     red = sub.add_parser("reddit",
                          help="cut the best few clips wide, long and untitled")
     red.add_argument("--count", type=int,
@@ -1020,6 +1063,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     tta = sub.add_parser("tiktok-auth", help="authorise TikTok and read audit status")
     tta.set_defaults(func=cmd_tiktok_auth)
+
+    igt = sub.add_parser("instagram-token",
+                         help="swap IG_ACCESS_TOKEN for a non-expiring Page token")
+    igt.set_defaults(func=cmd_instagram_token)
 
     pub = sub.add_parser("publish", help="post approved clips")
     pub.add_argument("--dry-run", action="store_true", help="show what would post")
